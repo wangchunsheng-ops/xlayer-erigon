@@ -12,7 +12,6 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/cmp"
 	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/types"
@@ -95,20 +94,16 @@ func (p *TxPool) bestForXLayer(n uint16, txs *types.TxsRlp, tx kv.Tx, onTopOf, a
 	removeWG.Wait()
 
 	if p.isDeniedYieldingTransactions() {
-		//log.Trace("Denied yielding transactions, cannot proceed")
 		return false, 0, nil
 	}
 
-	// First wait for the corresponding block to arrive
 	if p.lastSeenBlock.Load() < onTopOf {
-		//log.Trace("Block not yet arrived, too early to process", "lastSeenBlock", p.lastSeenBlock.Load(), "requiredBlock", onTopOf)
 		return false, 0, nil
 	}
 
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 
-	best := p.pending.best
 	readContext := ReadContext{
 		txs:              txs,
 		availableGas:     availableGas,
@@ -116,43 +111,30 @@ func (p *TxPool) bestForXLayer(n uint16, txs *types.TxsRlp, tx kv.Tx, onTopOf, a
 		toSkip:           toSkip,
 		count:            0,
 	}
-	readContext.txs.Resize(uint(cmp.Min(int(n), len(best.ms))))
+	readContext.txs.Resize(uint(n))
 
-	p.pending.EnforceBestInvariants()
-
-	// Prioritize OkPay txs first
-	ok, err := p.bestRead(n, tx, onTopOf, &readContext, true)
+	// Step 1: Get OkPay transactions first (priority)
+	okPayCount, err := p.getOkPayTransactionsForBlock(n, tx, onTopOf, &readContext)
 	if err != nil {
-		return ok, readContext.count, err
-	}
-	if !ok {
-		return false, readContext.count, nil
+		return false, readContext.count, err
 	}
 
-	// Add all other txs
-	ok, err = p.bestRead(n, tx, onTopOf, &readContext, false)
+	// Step 2: Get normal and fat transactions with quota allocation
+	remainingQuota := n - uint16(okPayCount)
+	err = p.getNormalAndFatTransactionsForBlock(remainingQuota, tx, onTopOf, &readContext)
 	if err != nil {
-		return ok, readContext.count, err
-	}
-	if !ok {
-		return false, readContext.count, nil
+		return false, readContext.count, err
 	}
 
+	// Step 3: Fill remaining quota if needed
+	err = p.fillRemainingQuotaForBlock(n, tx, onTopOf, &readContext)
+	if err != nil {
+		return false, readContext.count, err
+	}
+
+	// Finalize
 	readContext.txs.Resize(uint(readContext.count))
-	if len(readContext.toRemove) > 0 {
-		removeWG.Add(1)
-		go func() {
-			p.lock.Lock()
-			defer p.lock.Unlock()
-			removeWG.Done()
-			for _, mt := range readContext.toRemove {
-				p.pending.Remove(mt)
-				p.discardLocked(mt, UnsupportedTx)
-				//log.Debug("Removed transaction from pending pool", "txID", mt.Tx.IDHash)
-			}
-		}()
-		time.Sleep(1 * time.Nanosecond)
-	}
+	p.cleanupRemovedTransactions(&readContext)
 
 	return true, readContext.count, nil
 }
@@ -165,7 +147,10 @@ func (p *TxPool) bestRead(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadC
 	okPayTxPriorityCount := uint64(0)
 	maxOkPayTxPriorityCount := p.getOkPayTxPriorityCount()
 
-	for i := 0; readContext.count < int(n) && i < len(best.ms); i++ {
+	// Track how many transactions we've processed in this call
+	processedInThisCall := 0
+
+	for i := 0; processedInThisCall < int(n) && i < len(best.ms); i++ {
 		// if we wouldn't have enough gas for a standard transaction then quit out early
 		if readContext.availableGas < fixedgas.TxGas {
 			break
@@ -245,6 +230,7 @@ func (p *TxPool) bestRead(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadC
 		readContext.txs.IsLocal[readContext.count] = isLocal
 		readContext.toSkip.Add(mt.Tx.IDHash)
 		readContext.count++
+		processedInThisCall++
 
 		// For OkPay
 		if isOkPayPriority && isOkPayTx {
@@ -257,6 +243,174 @@ func (p *TxPool) bestRead(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadC
 	}
 
 	return true, nil
+}
+
+// getOkPayTransactionsForBlock gets OkPay transactions for block
+func (p *TxPool) getOkPayTransactionsForBlock(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) (int, error) {
+	p.pending.EnforceBestInvariants()
+
+	maxOkPayQuota := uint16(p.getOkPayTxPriorityCount())
+	okPayQuota := maxOkPayQuota
+	if okPayQuota > n {
+		okPayQuota = n
+	}
+
+	if okPayQuota > 0 {
+		_, err := p.bestRead(okPayQuota, tx, onTopOf, readContext, true)
+		if err != nil {
+			return readContext.count, err
+		}
+	}
+
+	return readContext.count, nil
+}
+
+// getNormalAndFatTransactionsForBlock gets normal and fat transactions with quota allocation
+func (p *TxPool) getNormalAndFatTransactionsForBlock(remainingQuota uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) error {
+	if remainingQuota == 0 {
+		return nil
+	}
+
+	// Calculate quotas
+	normalTxQuota, fatTxQuota := p.calculateNormalAndFatQuotas(remainingQuota, readContext.count)
+
+	// Fetch transactions based on calculated quotas
+	return p.fetchTransactionsByQuotas(normalTxQuota, fatTxQuota, tx, onTopOf, readContext)
+}
+
+// fillRemainingQuotaForBlock fills remaining quota from available pools
+func (p *TxPool) fillRemainingQuotaForBlock(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) error {
+	if readContext.count >= int(n) {
+		return nil
+	}
+
+	remainingSlots := int(n) - readContext.count
+	normalPoolSize := p.pending.Len()
+	fatPoolSize := p.fatTxPool.Len()
+
+	// Try to get more from normal pool first
+	if normalPoolSize > readContext.count && remainingSlots > 0 {
+		additional := uint16(remainingSlots)
+		if uint16(normalPoolSize-readContext.count) < additional {
+			additional = uint16(normalPoolSize - readContext.count)
+		}
+		if additional > 0 {
+			_, err := p.bestRead(additional, tx, onTopOf, readContext, false)
+			if err != nil {
+				return err
+			}
+			remainingSlots = int(n) - readContext.count
+		}
+	}
+
+	// Then try to get more from fat pool
+	if fatPoolSize > 0 && remainingSlots > 0 {
+		additional := uint16(remainingSlots)
+		if uint16(fatPoolSize) < additional {
+			additional = uint16(fatPoolSize)
+		}
+		if additional > 0 {
+			_, err := p.fatTxPool.ReadTransactionsForContext(additional, readContext, tx, p.isShanghai(), p.isLondon())
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// cleanupRemovedTransactions cleans up removed transactions
+func (p *TxPool) cleanupRemovedTransactions(readContext *ReadContext) {
+	if len(readContext.toRemove) > 0 {
+		removeWG.Add(1)
+		go func() {
+			p.lock.Lock()
+			defer p.lock.Unlock()
+			removeWG.Done()
+			for _, mt := range readContext.toRemove {
+				p.pending.Remove(mt)
+				p.discardLocked(mt, UnsupportedTx)
+			}
+		}()
+		time.Sleep(1 * time.Nanosecond)
+	}
+}
+
+// calculateNormalAndFatQuotas calculates quotas for normal and fat transactions
+func (p *TxPool) calculateNormalAndFatQuotas(remainingQuota uint16, alreadyProcessed int) (normalTxQuota, fatTxQuota uint16) {
+	normalPoolSize := p.pending.Len()
+	fatPoolSize := p.fatTxPool.Len()
+
+	if normalPoolSize > alreadyProcessed && fatPoolSize > 0 {
+		fatTxQuota = uint16(float64(remainingQuota) * DefaultFatTxMaxRatio) // 20% of remaining
+		if fatTxQuota < 1 {
+			fatTxQuota = 1
+		}
+		normalTxQuota = remainingQuota - fatTxQuota
+
+		// Adjust based on actual pool sizes
+		remainingNormalSize := uint16(normalPoolSize) - uint16(alreadyProcessed)
+		if remainingNormalSize < normalTxQuota {
+			fatTxQuota += normalTxQuota - remainingNormalSize
+			normalTxQuota = remainingNormalSize
+		}
+		if uint16(fatPoolSize) < fatTxQuota {
+			normalTxQuota += fatTxQuota - uint16(fatPoolSize)
+			fatTxQuota = uint16(fatPoolSize)
+		}
+	} else if normalPoolSize > alreadyProcessed {
+		// Only normal pool has remaining transactions
+		remainingNormalSize := uint16(normalPoolSize) - uint16(alreadyProcessed)
+		normalTxQuota = remainingNormalSize
+		if normalTxQuota > remainingQuota {
+			normalTxQuota = remainingQuota
+		}
+		fatTxQuota = 0
+	} else if fatPoolSize > 0 {
+		// Only fat pool has transactions
+		fatTxQuota = uint16(fatPoolSize)
+		if fatTxQuota > remainingQuota {
+			fatTxQuota = remainingQuota
+		}
+		normalTxQuota = 0
+	} else {
+		normalTxQuota = 0
+		fatTxQuota = 0
+	}
+
+	return normalTxQuota, fatTxQuota
+}
+
+// fetchTransactionsByQuotas fetches transactions based on calculated quotas
+func (p *TxPool) fetchTransactionsByQuotas(normalTxQuota, fatTxQuota uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) error {
+	// Get normal transactions
+	if normalTxQuota > 0 {
+		_, err := p.getNormalTransactionsForBlock(normalTxQuota, tx, onTopOf, readContext)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Get fat transactions
+	if fatTxQuota > 0 {
+		_, err := p.getFatTransactionsForBlock(fatTxQuota, tx, onTopOf, readContext)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// getNormalTransactionsForBlock gets normal transactions for block
+func (p *TxPool) getNormalTransactionsForBlock(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) (bool, error) {
+	return p.bestRead(n, tx, onTopOf, readContext, false)
+}
+
+// getFatTransactionsForBlock gets fat transactions for block
+func (p *TxPool) getFatTransactionsForBlock(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadContext) (bool, error) {
+	return p.fatTxPool.ReadTransactionsForContext(n, readContext, tx, p.isShanghai(), p.isLondon())
 }
 
 func contains(addresses []common.Address, addr common.Address) bool {

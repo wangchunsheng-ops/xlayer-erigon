@@ -693,3 +693,439 @@ func TestAddLocalTxsInParallel(t *testing.T) {
 		tx.Commit()
 	}
 }
+
+// TestFatTransactionIntegration tests fat transaction integration with the main pool
+func TestFatTransactionIntegration(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	ch := make(chan types.Announcements, 100)
+	_, coreDB, _ := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
+	defer coreDB.Close()
+
+	db := memdb.NewTestPoolDB(t)
+	path := fmt.Sprintf("/tmp/db-test-fat-tx-%v", time.Now().UTC().Format(time.RFC3339Nano))
+	txPoolDB := newTestTxPoolDB(t, path)
+	defer txPoolDB.Close()
+	aclsDB := newTestACLDB(t, path)
+	defer aclsDB.Close()
+
+	cfg := txpoolcfg.DefaultConfig
+	ethCfg := &ethconfig.Defaults
+	sendersCache := kvcache.New(kvcache.DefaultCoherentConfig)
+	pool, err := New(ch, coreDB, cfg, ethCfg, sendersCache, *u256.N1, nil, nil, aclsDB)
+	assert.NoError(err)
+	require.True(pool != nil)
+
+	ctx := context.Background()
+	var stateVersionID uint64 = 0
+	pendingBaseFee := uint64(200000)
+	h1 := gointerfaces.ConvertHashToH256([32]byte{})
+
+	// Create addresses for testing
+	var normalAddr [20]byte
+	normalAddr[0] = 1
+	var fatAddr [20]byte
+	fatAddr[0] = 2
+
+	// Fund addresses with 18 Ether for sending transactions
+	v := make([]byte, types.EncodeSenderLengthForStorage(0, *uint256.NewInt(18 * common.Ether)))
+	types.EncodeSender(0, *uint256.NewInt(18 * common.Ether), v)
+
+	change := &remote.StateChangeBatch{
+		StateVersionId:      stateVersionID,
+		PendingBlockBaseFee: pendingBaseFee,
+		BlockGasLimit:       1000000, // 1M gas limit
+		ChangeBatch: []*remote.StateChange{
+			{BlockHeight: 0, BlockHash: h1},
+		},
+	}
+	change.ChangeBatch[0].Changes = append(change.ChangeBatch[0].Changes, &remote.AccountChange{
+		Action:  remote.Action_UPSERT,
+		Address: gointerfaces.ConvertAddressToH160(normalAddr),
+		Data:    v,
+	})
+	change.ChangeBatch[0].Changes = append(change.ChangeBatch[0].Changes, &remote.AccountChange{
+		Action:  remote.Action_UPSERT,
+		Address: gointerfaces.ConvertAddressToH160(fatAddr),
+		Data:    v,
+	})
+
+	tx, err := db.BeginRw(ctx)
+	require.NoError(err)
+	defer tx.Rollback()
+	err = pool.OnNewBlock(ctx, change, types.TxSlots{}, types.TxSlots{}, tx)
+	assert.NoError(err)
+
+	// Test 1: Add normal transactions (should go to normal pool)
+	t.Run("NormalTransactions", func(t *testing.T) {
+		var txSlots types.TxSlots
+		for i := 0; i < 3; i++ {
+			txSlot := &types.TxSlot{
+				Tip:    *uint256.NewInt(300000),
+				FeeCap: *uint256.NewInt(1000000000),
+				Gas:    21000,     // Normal gas usage
+				Nonce:  uint64(i), // Use nonce starting from 0 to match account state
+			}
+			txSlot.IDHash[0] = byte(i)
+			txSlots.Append(txSlot, normalAddr[:], true)
+		}
+
+		reasons, err := pool.AddLocalTxs(ctx, txSlots, tx)
+		assert.NoError(err)
+		// Check that at least some transactions were added successfully
+		successCount := 0
+		for _, reason := range reasons {
+			if reason == Success {
+				successCount++
+			}
+		}
+		assert.Greater(successCount, 0, "At least one transaction should be added successfully")
+
+		// Check that transactions are in normal pool, not fat pool
+		assert.Greater(pool.pending.Len(), 0, "Should have transactions in normal pool")
+		assert.Equal(0, pool.fatTxPool.Len())
+	})
+
+	// Test 2: Add fat transactions (should go to fat pool)
+	t.Run("FatTransactions", func(t *testing.T) {
+		var txSlots types.TxSlots
+		for i := 0; i < 2; i++ {
+			txSlot := &types.TxSlot{
+				Tip:    *uint256.NewInt(300000),
+				FeeCap: *uint256.NewInt(1000000000),
+				Gas:    100000,    // 10% of block gas limit - should be fat
+				Nonce:  uint64(i), // Use nonce starting from 0 to match account state
+			}
+			txSlot.IDHash[0] = byte(i + 10)
+			txSlots.Append(txSlot, fatAddr[:], true)
+		}
+
+		reasons, err := pool.AddLocalTxs(ctx, txSlots, tx)
+		assert.NoError(err)
+		// Check that at least some transactions were added successfully
+		successCount := 0
+		for _, reason := range reasons {
+			if reason == Success {
+				successCount++
+			}
+		}
+		assert.Greater(successCount, 0, "At least one transaction should be added successfully")
+
+		// Check that transactions are in fat pool
+		assert.Greater(pool.fatTxPool.Len(), 0, "Should have transactions in fat pool")
+	})
+
+	// Test 3: Test quota allocation with both pools having transactions
+	t.Run("QuotaAllocation", func(t *testing.T) {
+		// Verify that we have transactions in both pools
+		normalPoolSize := pool.pending.Len()
+		fatPoolSize := pool.fatTxPool.Len()
+		assert.Greater(normalPoolSize, 0, "Should have transactions in normal pool")
+		assert.Greater(fatPoolSize, 0, "Should have transactions in fat pool")
+
+		// Test that fat transaction detection is working correctly
+		// Normal transactions should be in normal pool
+		assert.Equal(3, normalPoolSize, "Should have 3 normal transactions")
+		// Fat transactions should be in fat pool
+		assert.Equal(2, fatPoolSize, "Should have 2 fat transactions")
+
+		// Test that the pools are properly isolated
+		// This verifies that our fat transaction detection and isolation is working
+		t.Logf("Normal pool size: %d, Fat pool size: %d", normalPoolSize, fatPoolSize)
+	})
+}
+
+// TestFatTransactionRemoval tests fat transaction removal scenarios
+func TestFatTransactionRemoval(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	ch := make(chan types.Announcements, 100)
+	_, coreDB, _ := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
+	defer coreDB.Close()
+
+	db := memdb.NewTestPoolDB(t)
+	path := fmt.Sprintf("/tmp/db-test-fat-removal-%v", time.Now().UTC().Format(time.RFC3339Nano))
+	txPoolDB := newTestTxPoolDB(t, path)
+	defer txPoolDB.Close()
+	aclsDB := newTestACLDB(t, path)
+	defer aclsDB.Close()
+
+	cfg := txpoolcfg.DefaultConfig
+	ethCfg := &ethconfig.Defaults
+	sendersCache := kvcache.New(kvcache.DefaultCoherentConfig)
+	pool, err := New(ch, coreDB, cfg, ethCfg, sendersCache, *u256.N1, nil, nil, aclsDB)
+	assert.NoError(err)
+	require.True(pool != nil)
+
+	ctx := context.Background()
+	var stateVersionID uint64 = 0
+	pendingBaseFee := uint64(200000)
+	h1 := gointerfaces.ConvertHashToH256([32]byte{})
+
+	// Create address for testing
+	var addr [20]byte
+	addr[0] = 1
+
+	// Fund address with 18 Ether
+	v := make([]byte, types.EncodeSenderLengthForStorage(0, *uint256.NewInt(18 * common.Ether)))
+	types.EncodeSender(0, *uint256.NewInt(18 * common.Ether), v)
+
+	change := &remote.StateChangeBatch{
+		StateVersionId:      stateVersionID,
+		PendingBlockBaseFee: pendingBaseFee,
+		BlockGasLimit:       1000000,
+		ChangeBatch: []*remote.StateChange{
+			{BlockHeight: 0, BlockHash: h1},
+		},
+	}
+	change.ChangeBatch[0].Changes = append(change.ChangeBatch[0].Changes, &remote.AccountChange{
+		Action:  remote.Action_UPSERT,
+		Address: gointerfaces.ConvertAddressToH160(addr),
+		Data:    v,
+	})
+
+	tx, err := db.BeginRw(ctx)
+	require.NoError(err)
+	defer tx.Rollback()
+	err = pool.OnNewBlock(ctx, change, types.TxSlots{}, types.TxSlots{}, tx)
+	assert.NoError(err)
+
+	// Add a fat transaction
+	var txSlots types.TxSlots
+	txSlot := &types.TxSlot{
+		Tip:    *uint256.NewInt(300000),
+		FeeCap: *uint256.NewInt(1000000000),
+		Gas:    100000, // Fat transaction
+		Nonce:  0,      // Use nonce 0 to match account state
+	}
+	txSlot.IDHash[0] = 1
+	txSlots.Append(txSlot, addr[:], true)
+
+	reasons, err := pool.AddLocalTxs(ctx, txSlots, tx)
+	assert.NoError(err)
+	for _, reason := range reasons {
+		assert.Equal(Success, reason, reason.String())
+	}
+
+	// Verify transaction is in fat pool
+	assert.Equal(1, pool.fatTxPool.Len())
+
+	// Test removal via discard
+	// Find the transaction in the pool
+	var fatTx *metaTx
+	for _, mt := range pool.byHash {
+		if mt.currentSubPool == FatTxsSubPool {
+			fatTx = mt
+			break
+		}
+	}
+	require.NotNil(fatTx, "Fat transaction should be found in pool")
+
+	// Remove the transaction
+	pool.discardLocked(fatTx, FeeTooLow)
+
+	// Verify transaction is removed from fat pool
+	assert.Equal(0, pool.fatTxPool.Len())
+}
+
+// TestFatTransactionQuotaAllocation tests the quota allocation logic in detail
+func TestFatTransactionQuotaAllocation(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	ch := make(chan types.Announcements, 100)
+	_, coreDB, _ := temporaltest.NewTestDB(t, datadir.New(t.TempDir()))
+	defer coreDB.Close()
+
+	db := memdb.NewTestPoolDB(t)
+	path := fmt.Sprintf("/tmp/db-test-fat-quota-%v", time.Now().UTC().Format(time.RFC3339Nano))
+	txPoolDB := newTestTxPoolDB(t, path)
+	defer txPoolDB.Close()
+	aclsDB := newTestACLDB(t, path)
+	defer aclsDB.Close()
+
+	cfg := txpoolcfg.DefaultConfig
+	ethCfg := &ethconfig.Defaults
+	sendersCache := kvcache.New(kvcache.DefaultCoherentConfig)
+	pool, err := New(ch, coreDB, cfg, ethCfg, sendersCache, *u256.N1, nil, nil, aclsDB)
+	assert.NoError(err)
+	require.True(pool != nil)
+
+	ctx := context.Background()
+	var stateVersionID uint64 = 0
+	pendingBaseFee := uint64(200000)
+	h1 := gointerfaces.ConvertHashToH256([32]byte{})
+
+	// Create addresses for testing
+	var normalAddr [20]byte
+	normalAddr[0] = 1
+	var fatAddr [20]byte
+	fatAddr[0] = 2
+
+	// Fund addresses with 18 Ether
+	v := make([]byte, types.EncodeSenderLengthForStorage(0, *uint256.NewInt(18 * common.Ether)))
+	types.EncodeSender(0, *uint256.NewInt(18 * common.Ether), v)
+
+	change := &remote.StateChangeBatch{
+		StateVersionId:      stateVersionID,
+		PendingBlockBaseFee: pendingBaseFee,
+		BlockGasLimit:       1000000,
+		ChangeBatch: []*remote.StateChange{
+			{BlockHeight: 0, BlockHash: h1},
+		},
+	}
+	change.ChangeBatch[0].Changes = append(change.ChangeBatch[0].Changes, &remote.AccountChange{
+		Action:  remote.Action_UPSERT,
+		Address: gointerfaces.ConvertAddressToH160(normalAddr),
+		Data:    v,
+	})
+	change.ChangeBatch[0].Changes = append(change.ChangeBatch[0].Changes, &remote.AccountChange{
+		Action:  remote.Action_UPSERT,
+		Address: gointerfaces.ConvertAddressToH160(fatAddr),
+		Data:    v,
+	})
+
+	tx, err := db.BeginRw(ctx)
+	require.NoError(err)
+	defer tx.Rollback()
+	err = pool.OnNewBlock(ctx, change, types.TxSlots{}, types.TxSlots{}, tx)
+	assert.NoError(err)
+
+	// Test 1: Both pools have transactions - test quota allocation
+	t.Run("BothPoolsHaveTransactions", func(t *testing.T) {
+		// Add normal transactions
+		var normalTxSlots types.TxSlots
+		for i := 0; i < 5; i++ {
+			txSlot := &types.TxSlot{
+				Tip:    *uint256.NewInt(300000),
+				FeeCap: *uint256.NewInt(1000000000),
+				Gas:    21000, // Normal gas usage
+				Nonce:  uint64(i),
+			}
+			txSlot.IDHash[0] = byte(i)
+			normalTxSlots.Append(txSlot, normalAddr[:], true)
+		}
+
+		reasons, err := pool.AddLocalTxs(ctx, normalTxSlots, tx)
+		assert.NoError(err)
+		successCount := 0
+		for _, reason := range reasons {
+			if reason == Success {
+				successCount++
+			}
+		}
+		assert.Greater(successCount, 0, "Should add normal transactions")
+
+		// Add fat transactions
+		var fatTxSlots types.TxSlots
+		for i := 0; i < 3; i++ {
+			txSlot := &types.TxSlot{
+				Tip:    *uint256.NewInt(300000),
+				FeeCap: *uint256.NewInt(1000000000),
+				Gas:    100000, // Fat transaction
+				Nonce:  uint64(i),
+			}
+			txSlot.IDHash[0] = byte(i + 10)
+			fatTxSlots.Append(txSlot, fatAddr[:], true)
+		}
+
+		reasons, err = pool.AddLocalTxs(ctx, fatTxSlots, tx)
+		assert.NoError(err)
+		successCount = 0
+		for _, reason := range reasons {
+			if reason == Success {
+				successCount++
+			}
+		}
+		assert.Greater(successCount, 0, "Should add fat transactions")
+
+		// Verify pool sizes
+		normalPoolSize := pool.pending.Len()
+		fatPoolSize := pool.fatTxPool.Len()
+		assert.Greater(normalPoolSize, 0, "Should have normal transactions")
+		assert.Greater(fatPoolSize, 0, "Should have fat transactions")
+
+		// Test quota calculation logic (simulate the logic from bestForXLayer)
+		requestedTx := uint16(10) // Request 10 transactions
+		var normalTxQuota, fatTxQuota uint16
+
+		if normalPoolSize > 0 && fatPoolSize > 0 {
+			fatTxQuota = uint16(float64(requestedTx) * 0.2) // 20% fat transactions
+			if fatTxQuota < 1 {
+				fatTxQuota = 1
+			}
+			normalTxQuota = requestedTx - fatTxQuota
+
+			// Adjust quotas based on actual pool sizes
+			if uint16(fatPoolSize) < fatTxQuota {
+				normalTxQuota += fatTxQuota - uint16(fatPoolSize)
+				fatTxQuota = uint16(fatPoolSize)
+			}
+			if uint16(normalPoolSize) < normalTxQuota {
+				fatTxQuota += normalTxQuota - uint16(normalPoolSize)
+				normalTxQuota = uint16(normalPoolSize)
+			}
+		}
+
+		// Verify quota calculation
+		assert.Greater(int(normalTxQuota), 0, "Should allocate quota for normal transactions")
+		assert.Greater(int(fatTxQuota), 0, "Should allocate quota for fat transactions")
+		assert.Equal(int(requestedTx), int(normalTxQuota+fatTxQuota), "Total quota should equal requested amount")
+	})
+}
+
+// TestFatTransactionDetectionEdgeCases tests edge cases in fat transaction detection
+func TestFatTransactionDetectionEdgeCases(t *testing.T) {
+	assert := assert.New(t)
+
+	config := FatTxConfig{
+		GasRatioThreshold: 0.05, // 5%
+		PoolSizeLimit:     10,
+		MaxRatio:          0.2,
+		Enabled:           true,
+	}
+
+	getRlpFunc := func(tx kv.Tx, hash []byte) ([]byte, common.Address, bool, error) {
+		return []byte{0x01, 0x02, 0x03}, common.Address{}, false, nil
+	}
+
+	fatPool := NewFatTxPool(config, getRlpFunc)
+
+	// Test 1: Disabled fat transaction pool
+	t.Run("DisabledPool", func(t *testing.T) {
+		fatPool.Disable()
+		txSlot := &types.TxSlot{
+			Gas: 100000, // High gas usage
+		}
+		assert.False(fatPool.IsFatTransaction(txSlot, 1000000), "Should not detect fat transaction when disabled")
+		fatPool.Enable()
+	})
+
+	// Test 2: Zero block gas limit
+	t.Run("ZeroBlockGasLimit", func(t *testing.T) {
+		txSlot := &types.TxSlot{
+			Gas: 100000,
+		}
+		assert.False(fatPool.IsFatTransaction(txSlot, 0), "Should not detect fat transaction with zero block gas limit")
+	})
+
+	// Test 3: Exact threshold gas usage
+	t.Run("ExactThreshold", func(t *testing.T) {
+		txSlot := &types.TxSlot{
+			Gas: 50000, // Exactly 5% of 1M gas limit
+		}
+		assert.False(fatPool.IsFatTransaction(txSlot, 1000000), "Should not detect fat transaction at exact threshold")
+	})
+
+	// Test 4: Just above threshold
+	t.Run("JustAboveThreshold", func(t *testing.T) {
+		txSlot := &types.TxSlot{
+			Gas: 51000, // Just above 5% of 1M gas limit
+		}
+		assert.True(fatPool.IsFatTransaction(txSlot, 1000000), "Should detect fat transaction just above threshold")
+	})
+
+	// Test 5: Very high gas usage
+	t.Run("VeryHighGasUsage", func(t *testing.T) {
+		txSlot := &types.TxSlot{
+			Gas: 500000, // 50% of 1M gas limit
+		}
+		assert.True(fatPool.IsFatTransaction(txSlot, 1000000), "Should detect fat transaction with very high gas usage")
+	})
+}

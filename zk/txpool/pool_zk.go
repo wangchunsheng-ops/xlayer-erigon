@@ -36,7 +36,7 @@ func calcProtocolBaseFee(baseFee uint64) uint64 {
 // nonces, and also affect other transactions from the same sender with higher nonce, it loops through all transactions
 // for a given senderID
 func (p *TxPool) onSenderStateChange(senderID uint64, senderNonce uint64, senderBalance uint256.Int, byNonce *BySenderAndNonce,
-	protocolBaseFee, blockGasLimit uint64, pending *PendingPool, baseFee, queued *SubPool, discard func(*metaTx, DiscardReason)) {
+	protocolBaseFee, blockGasLimit uint64, pending *PendingPool, baseFee, queued *SubPool, fatTxPool *FatTxPool, discard func(*metaTx, DiscardReason)) {
 	noGapsNonce := senderNonce
 	cumulativeRequiredBalance := uint256.NewInt(0)
 	minFeeCap := uint256.NewInt(0).SetAllOne()
@@ -67,6 +67,8 @@ func (p *TxPool) onSenderStateChange(senderID uint64, senderNonce uint64, sender
 				baseFee.Remove(mt)
 			case QueuedSubPool:
 				queued.Remove(mt)
+			case FatTxsSubPool:
+				fatTxPool.RemoveTransaction(mt)
 			default:
 				//already removed
 			}
@@ -358,7 +360,7 @@ func (p *TxPool) RemoveMinedTransactions(ctx context.Context, tx kv.Tx, blockGas
 			return err
 		}
 		p.onSenderStateChange(senderID, nonce, balance, p.all,
-			baseFee, blockGasLimit, p.pending, p.baseFee, p.queued, p.discardLocked)
+			baseFee, blockGasLimit, p.pending, p.baseFee, p.queued, p.fatTxPool, p.discardLocked)
 
 	}
 	return nil
@@ -394,7 +396,7 @@ func (p *TxPool) TriggerSenderStateChanges(ctx context.Context, tx kv.Tx, blockG
 			return err
 		}
 		p.onSenderStateChange(senderID, nonce, balance, p.all,
-			baseFee, blockGasLimit, p.pending, p.baseFee, p.queued, p.discardLocked)
+			baseFee, blockGasLimit, p.pending, p.baseFee, p.queued, p.fatTxPool, p.discardLocked)
 	}
 
 	return nil

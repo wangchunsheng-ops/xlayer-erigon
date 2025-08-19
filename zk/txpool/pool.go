@@ -259,6 +259,7 @@ const PendingSubPool SubPoolType = 1
 const BaseFeeSubPool SubPoolType = 2
 const QueuedSubPool SubPoolType = 3
 const LimboSubPool SubPoolType = 4
+const FatTxsSubPool SubPoolType = 5
 
 const LimboSubPoolSize = 100_000 // overkill but better too large than too small
 
@@ -270,6 +271,8 @@ func (sp SubPoolType) String() string {
 		return "BaseFee"
 	case QueuedSubPool:
 		return "Queued"
+	case FatTxsSubPool:
+		return "FatTxs"
 	}
 	return fmt.Sprintf("Unknown:%d", sp)
 }
@@ -319,6 +322,7 @@ type TxPool struct {
 	pending                 *PendingPool
 	baseFee                 *SubPool
 	queued                  *SubPool
+	fatTxPool               *FatTxPool                       // Fat transaction pool
 	isLocalLRU              *simplelru.LRU[string, struct{}] // tx_hash => is_local : to restore isLocal flag of unwinded transactions
 	newPendingTxs           chan types.Announcements         // notifications about new txs in Pending sub-pool
 	all                     *BySenderAndNonce                // senderID => (sorted map of tx nonce => *metaTx)
@@ -391,6 +395,7 @@ func New(newTxs chan types.Announcements, coreDB kv.RoDB, cfg txpoolcfg.Config, 
 		pending:                 NewPendingSubPool(PendingSubPool, cfg.PendingSubPoolLimit, ethCfg.DeprecatedTxPool.EnableTimsort), // For X Layer, optimize tx pool
 		baseFee:                 NewSubPool(BaseFeeSubPool, cfg.BaseFeeSubPoolLimit),
 		queued:                  NewSubPool(QueuedSubPool, cfg.QueuedSubPoolLimit),
+		fatTxPool:               NewFatTxPool(FatTxConfig{Enabled: true}, nil), // Will be set after pool creation
 		newPendingTxs:           newTxs,
 		_stateCache:             cache,
 		senders:                 newSendersCache(tracedSenders),
@@ -424,6 +429,9 @@ func New(newTxs chan types.Announcements, coreDB kv.RoDB, cfg txpoolcfg.Config, 
 		freeGasAddrs: map[string]bool{},
 	}
 	tp.setFreeGasList(ethCfg.DeprecatedTxPool.FreeGasList)
+
+	// Set the getRlpFunc for fat transaction pool
+	tp.fatTxPool = NewFatTxPool(FatTxConfig{Enabled: true}, tp.getRlpLocked)
 
 	return tp, nil
 }
@@ -504,7 +512,7 @@ func (p *TxPool) OnNewBlock(ctx context.Context, stateChanges *remote.StateChang
 		}
 	}
 
-	if err := removeMined(p.all, minedTxs.Txs, p.pending, p.baseFee, p.queued, p.discardLocked); err != nil {
+	if err := removeMined(p.all, minedTxs.Txs, p.pending, p.baseFee, p.queued, p.fatTxPool, p.discardLocked); err != nil {
 		return err
 	}
 
@@ -605,7 +613,7 @@ func (p *TxPool) processRemoteTxs(ctx context.Context) error {
 	}
 
 	announcements, _, err := p.addTxs(p.lastSeenBlock.Load(), cacheView, p.senders, newTxs,
-		p.pendingBaseFee.Load(), p.blockGasLimit.Load(), p.pending, p.baseFee, p.queued, p.all, p.byHash, p.addLocked, p.discardLocked, true)
+		p.pendingBaseFee.Load(), p.blockGasLimit.Load(), p.pending, p.baseFee, p.queued, p.fatTxPool, p.all, p.byHash, p.addLocked, p.discardLocked, true)
 	if err != nil {
 		return err
 	}
@@ -737,6 +745,14 @@ func (p *TxPool) CountContent() (int, int, int) {
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 	return p.pending.Len(), p.baseFee.Len(), p.queued.Len()
+}
+
+// CountContentWithFatPool returns content count including fat transaction pool
+func (p *TxPool) CountContentWithFatPool() (int, int, int, int) {
+	// For X Layer, optimize tx pool
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+	return p.pending.Len(), p.baseFee.Len(), p.queued.Len(), p.fatTxPool.Len()
 }
 func (p *TxPool) AddRemoteTxs(_ context.Context, newTxs types.TxSlots) {
 	defer addRemoteTxsTimer.UpdateDuration(time.Now())
@@ -1045,7 +1061,7 @@ func (p *TxPool) AddLocalTxs(ctx context.Context, newTransactions types.TxSlots,
 	}
 
 	announcements, addReasons, err := p.addTxs(p.lastSeenBlock.Load(), cacheView, p.senders, newTxs,
-		p.pendingBaseFee.Load(), p.blockGasLimit.Load(), p.pending, p.baseFee, p.queued, p.all, p.byHash, p.addLocked, p.discardLocked, true)
+		p.pendingBaseFee.Load(), p.blockGasLimit.Load(), p.pending, p.baseFee, p.queued, p.fatTxPool, p.all, p.byHash, p.addLocked, p.discardLocked, true)
 	if err == nil {
 		for i, reason := range addReasons {
 			if reason != NotSet {
@@ -1096,7 +1112,7 @@ func (p *TxPool) cache() kvcache.Cache {
 
 func (p *TxPool) addTxs(blockNum uint64, cacheView kvcache.CacheView, senders *sendersBatch,
 	newTxs types.TxSlots, pendingBaseFee, blockGasLimit uint64,
-	pending *PendingPool, baseFee, queued *SubPool,
+	pending *PendingPool, baseFee, queued *SubPool, fatTxPool *FatTxPool,
 	byNonce *BySenderAndNonce, byHash map[string]*metaTx, add func(*metaTx, *types.Announcements) DiscardReason, discard func(*metaTx, DiscardReason), collect bool) (types.Announcements, []DiscardReason, error) {
 	protocolBaseFee := calcProtocolBaseFee(pendingBaseFee)
 	if assert.Enable {
@@ -1128,6 +1144,25 @@ func (p *TxPool) addTxs(blockNum uint64, cacheView kvcache.CacheView, senders *s
 			continue
 		}
 		mt := newMetaTx(txn, newTxs.IsLocal[i], blockNum)
+
+		// Check if it's a fat transaction
+		if fatTxPool.IsFatTransaction(txn, blockGasLimit) {
+			// Add fat transaction directly to fat transaction pool
+			mt.currentSubPool = FatTxsSubPool
+			if fatTxPool.AddTransaction(mt) {
+				byHash[string(txn.IDHash[:])] = mt
+				byNonce.replaceOrInsert(mt)
+				discardReasons[i] = NotSet
+				sendersWithChangedState[mt.Tx.SenderID] = struct{}{}
+			} else {
+				log.Warn("FAT TX POOL FULL",
+					"txHash", fmt.Sprintf("%x", txn.IDHash))
+				discardReasons[i] = PendingPoolOverflow
+			}
+			continue
+		}
+
+		// Normal transaction processing
 		if reason := add(mt, &announcements); reason != NotSet {
 			discardReasons[i] = reason
 			continue
@@ -1147,7 +1182,7 @@ func (p *TxPool) addTxs(blockNum uint64, cacheView kvcache.CacheView, senders *s
 			return announcements, discardReasons, err
 		}
 		p.onSenderStateChange(senderID, nonce, balance, byNonce,
-			protocolBaseFee, blockGasLimit, pending, baseFee, queued, discard)
+			protocolBaseFee, blockGasLimit, pending, baseFee, queued, p.fatTxPool, discard)
 	}
 
 	promote(pending, baseFee, queued, pendingBaseFee, discard, &announcements)
@@ -1237,7 +1272,7 @@ func (p *TxPool) addTxsOnNewBlock(
 			return announcements, err
 		}
 		p.onSenderStateChange(senderID, nonce, balance, byNonce,
-			protocolBaseFee, blockGasLimit, pending, baseFee, queued, discard)
+			protocolBaseFee, blockGasLimit, pending, baseFee, queued, p.fatTxPool, discard)
 	}
 
 	promote(pending, baseFee, queued, pendingBaseFee, discard, &announcements)
@@ -1299,6 +1334,8 @@ func (p *TxPool) addLocked(mt *metaTx, announcements *types.Announcements) Disca
 			p.baseFee.Remove(found)
 		case QueuedSubPool:
 			p.queued.Remove(found)
+		case FatTxsSubPool:
+			p.fatTxPool.RemoveTransaction(found)
 		default:
 			//already removed
 		}
@@ -1331,6 +1368,12 @@ func (p *TxPool) discardLocked(mt *metaTx, reason DiscardReason) {
 	delete(p.byHash, string(mt.Tx.IDHash[:]))
 	p.deletedTxs = append(p.deletedTxs, mt)
 	p.all.delete(mt)
+
+	// Remove from fat transaction pool if it's in there
+	if mt.currentSubPool == FatTxsSubPool {
+		p.fatTxPool.RemoveTransaction(mt)
+	}
+
 	p.discardReasonsLRU.Add(string(mt.Tx.IDHash[:]), reason)
 }
 
@@ -1352,7 +1395,7 @@ func (p *TxPool) NonceFromAddress(addr [20]byte) (nonce uint64, inPool bool) {
 // modify state_balance and state_nonce, potentially remove some elements (if transaction with some nonce is
 // included into a block), and finally, walk over the transaction records and update SubPool fields depending on
 // the actual presence of nonce gaps and what the balance is.
-func removeMined(byNonce *BySenderAndNonce, minedTxs []*types.TxSlot, pending *PendingPool, baseFee, queued *SubPool, discard func(*metaTx, DiscardReason)) error {
+func removeMined(byNonce *BySenderAndNonce, minedTxs []*types.TxSlot, pending *PendingPool, baseFee, queued *SubPool, fatTxPool *FatTxPool, discard func(*metaTx, DiscardReason)) error {
 	noncesToRemove := map[uint64]uint64{}
 	for _, txn := range minedTxs {
 		nonce, ok := noncesToRemove[txn.SenderID]
@@ -1384,6 +1427,8 @@ func removeMined(byNonce *BySenderAndNonce, minedTxs []*types.TxSlot, pending *P
 				baseFee.Remove(mt)
 			case QueuedSubPool:
 				queued.Remove(mt)
+			case FatTxsSubPool:
+				fatTxPool.RemoveTransaction(mt)
 			default:
 				//already removed
 			}
@@ -1817,7 +1862,7 @@ func (p *TxPool) fromDB(ctx context.Context, tx kv.Tx, coreTx kv.Tx) error {
 		return err
 	}
 	if _, _, err := p.addTxs(p.lastSeenBlock.Load(), cacheView, p.senders, txs,
-		pendingBaseFee, math.MaxUint64 /* blockGasLimit */, p.pending, p.baseFee, p.queued, p.all, p.byHash, p.addLocked, p.discardLocked, false); err != nil {
+		pendingBaseFee, math.MaxUint64 /* blockGasLimit */, p.pending, p.baseFee, p.queued, p.fatTxPool, p.all, p.byHash, p.addLocked, p.discardLocked, false); err != nil {
 		return err
 	}
 	p.pendingBaseFee.Store(pendingBaseFee)
@@ -1874,7 +1919,7 @@ func (p *TxPool) printDebug(prefix string) {
 	for _, j := range p.byHash {
 		fmt.Printf("\tsenderID=%d, nonce=%d, tip=%d\n", j.Tx.SenderID, j.Tx.Nonce, j.Tx.Tip)
 	}
-	fmt.Printf("%s.pool.queues.len: %d,%d,%d\n", prefix, p.pending.Len(), p.baseFee.Len(), p.queued.Len())
+	fmt.Printf("%s.pool.queues.len: %d,%d,%d,%d\n", prefix, p.pending.Len(), p.baseFee.Len(), p.queued.Len(), p.fatTxPool.Len())
 	for _, mt := range p.pending.best.ms {
 		mt.Tx.PrintDebug(fmt.Sprintf("%s.pending: %b,%d,%d,%d", prefix, mt.subPool, mt.Tx.SenderID, mt.Tx.Nonce, mt.Tx.Tip))
 	}
@@ -1883,6 +1928,9 @@ func (p *TxPool) printDebug(prefix string) {
 	}
 	for _, mt := range p.queued.best.ms {
 		mt.Tx.PrintDebug(fmt.Sprintf("%s.queued : %b,%d,%d,%d", prefix, mt.subPool, mt.Tx.SenderID, mt.Tx.Nonce, mt.Tx.Tip))
+	}
+	for _, mt := range p.fatTxPool.GetPool().best.ms {
+		mt.Tx.PrintDebug(fmt.Sprintf("%s.fatTxs: %b,%d,%d,%d", prefix, mt.subPool, mt.Tx.SenderID, mt.Tx.Nonce, mt.Tx.Tip))
 	}
 }
 func (p *TxPool) logStats() {
@@ -1902,6 +1950,7 @@ func (p *TxPool) logStats() {
 		"pending", p.pending.Len(),
 		"baseFee", p.baseFee.Len(),
 		"queued", p.queued.Len(),
+		"fatTxs", p.fatTxPool.Len(),
 	}
 	cacheKeys := p._stateCache.Len()
 	if cacheKeys > 0 {
@@ -1951,8 +2000,8 @@ func (p *TxPool) purge() {
 	toDelete := make([]*metaTx, 0)
 
 	p.all.ascendAll(func(mt *metaTx) bool {
-		// don't purge from pending
-		if mt.currentSubPool == PendingSubPool {
+		// don't purge from pending or fat transaction pool
+		if mt.currentSubPool == PendingSubPool || mt.currentSubPool == FatTxsSubPool {
 			return true
 		}
 		if mt.created < cutOff {
@@ -1969,6 +2018,8 @@ func (p *TxPool) purge() {
 			p.baseFee.Remove(mt)
 		case QueuedSubPool:
 			p.queued.Remove(mt)
+		case FatTxsSubPool:
+			p.fatTxPool.RemoveTransaction(mt)
 		default:
 			//already removed
 		}
