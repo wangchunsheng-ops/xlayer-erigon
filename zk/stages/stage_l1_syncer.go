@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/log/v3"
@@ -75,7 +75,8 @@ func SpawnStageL1Syncer(
 	quiet bool,
 ) (funcErr error) {
 	///// DEBUG BISECT /////
-	if cfg.zkCfg.DebugLimit > 0 {
+	if cfg.zkCfg.DebugLimit > 0 && !cfg.zkCfg.XLayer.SyncSeqLogs {
+		log.Warn(fmt.Sprintf("[%s] Skipping L1 sync stage, as debug limit is set %d and the rpc sync seq logs is disabled", s.LogPrefix(), cfg.zkCfg.DebugLimit))
 		return nil
 	}
 	///// DEBUG BISECT /////
@@ -423,12 +424,12 @@ func blockComparison(tx kv.RwTx, hermezDb *hermez_db.HermezDb, blockNo uint64, l
 
 func isTestEnv() bool {
 	if strings.Contains(os.Args[0], "test") {
-        return true
-    }
+		return true
+	}
 	for _, arg := range os.Args {
-        if strings.HasPrefix(arg, "-test.") {
-            return true
-        }
-    }
+		if strings.HasPrefix(arg, "-test.") {
+			return true
+		}
+	}
 	return false
 }
