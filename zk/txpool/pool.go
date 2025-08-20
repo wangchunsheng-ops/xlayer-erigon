@@ -688,9 +688,9 @@ func (p *TxPool) AppendAllAnnouncements(types []byte, sizes []uint32, hashes []b
 }
 func (p *TxPool) IdHashKnown(tx kv.Tx, hash []byte) (bool, error) {
 	// For X Layer, optimize tx pool
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-	if p.discardReasonsLRU.Contains(string(hash)) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	if _, ok := p.discardReasonsLRU.Get(string(hash)); ok {
 		return true, nil
 	}
 	if _, ok := p.unprocessedRemoteByHash[string(hash)]; ok {
