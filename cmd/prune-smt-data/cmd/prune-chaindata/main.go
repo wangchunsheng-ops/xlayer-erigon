@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/c2h5oh/datasize"
 	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
@@ -14,10 +15,8 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	mdbxpkg "github.com/ledgerwatch/erigon-lib/kv/mdbx"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/smt/pkg/db"
-	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 
 	logv3 "github.com/ledgerwatch/log/v3"
 )
@@ -38,6 +37,188 @@ type LatestBlockInfo struct {
 	Header      *types.Header
 	TxCount     int
 	NeedRestore bool
+}
+
+// getLatestBlockNumber reads the latest block number from CanonicalHeader table
+func getLatestBlockNumber(tx kv.RwTx) (uint64, error) {
+	cursor, err := tx.Cursor("CanonicalHeader")
+	if err != nil {
+		return 0, fmt.Errorf("failed to open CanonicalHeader cursor: %w", err)
+	}
+	defer cursor.Close()
+
+	// Move to last entry
+	key, _, err := cursor.Last()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last entry: %w", err)
+	}
+	if len(key) == 0 {
+		return 0, fmt.Errorf("no blocks found in CanonicalHeader table")
+	}
+
+	// CanonicalHeader key is block number (8 bytes, big endian)
+	if len(key) != 8 {
+		return 0, fmt.Errorf("invalid key length in CanonicalHeader: %d", len(key))
+	}
+
+	blockNumber := binary.BigEndian.Uint64(key)
+	return blockNumber, nil
+}
+
+// extractBlockNumberFromKey extracts block number from table key based on table structure
+func extractBlockNumberFromKey(key []byte, tableName string) (uint64, error) {
+	switch tableName {
+	case "Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader":
+		// These tables use block number (8 bytes, big endian) as key
+		if len(key) < 8 {
+			return 0, fmt.Errorf("key too short for %s: %d bytes", tableName, len(key))
+		}
+		return binary.BigEndian.Uint64(key[:8]), nil
+
+	case "TransactionLog":
+		// Format: blockNum(8) + txIndex(4) + logIndex(4)
+		if len(key) < 8 {
+			return 0, fmt.Errorf("key too short for %s: %d bytes", tableName, len(key))
+		}
+		return binary.BigEndian.Uint64(key[:8]), nil
+
+	default:
+		return 0, fmt.Errorf("unsupported table for block number extraction: %s", tableName)
+	}
+}
+
+// partialPruneHeaderNumberTable handles HeaderNumber table which has value-based block numbers
+func partialPruneHeaderNumberTable(tx kv.RwTx, pruneBeforeBlock uint64) error {
+	cursor, err := tx.RwCursor("HeaderNumber")
+	if err != nil {
+		return fmt.Errorf("failed to open HeaderNumber cursor: %w", err)
+	}
+	defer cursor.Close()
+
+	var keysToDelete [][]byte
+
+	for key, value, err := cursor.First(); key != nil; key, value, err = cursor.Next() {
+		if err != nil {
+			return fmt.Errorf("failed to iterate HeaderNumber: %w", err)
+		}
+
+		// HeaderNumber value is block number (8 bytes, big endian)
+		if len(value) >= 8 {
+			blockNumber := binary.BigEndian.Uint64(value[:8])
+			if blockNumber < pruneBeforeBlock {
+				// Make a copy of the key
+				keysCopy := make([]byte, len(key))
+				copy(keysCopy, key)
+				keysToDelete = append(keysToDelete, keysCopy)
+			}
+		}
+	}
+
+	// Delete collected keys
+	for _, key := range keysToDelete {
+		key2, _, err := cursor.SeekExact(key)
+		if err != nil || key2 == nil {
+			return fmt.Errorf("failed to seek to key for deletion: %w", err)
+		}
+		if err := cursor.DeleteCurrent(); err != nil {
+			return fmt.Errorf("failed to delete HeaderNumber entry: %w", err)
+		}
+	}
+
+	fmt.Printf("    HeaderNumber: deleted %d entries before block %d\n", len(keysToDelete), pruneBeforeBlock)
+	return nil
+}
+
+// partialPruneTable performs partial pruning on a table, keeping recent blocks
+func partialPruneTable(tx kv.RwTx, tableName string, pruneBeforeBlock uint64) error {
+	cursor, err := tx.RwCursor(tableName)
+	if err != nil {
+		return fmt.Errorf("failed to open %s cursor: %w", tableName, err)
+	}
+	defer cursor.Close()
+
+	var keysToDelete [][]byte
+
+	// First pass: collect keys to delete
+	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return fmt.Errorf("failed to iterate %s: %w", tableName, err)
+		}
+
+		blockNumber, err := extractBlockNumberFromKey(key, tableName)
+		if err != nil {
+			// Skip entries we can't parse
+			continue
+		}
+
+		if blockNumber < pruneBeforeBlock {
+			// Make a copy of the key
+			keysCopy := make([]byte, len(key))
+			copy(keysCopy, key)
+			keysToDelete = append(keysToDelete, keysCopy)
+		}
+	}
+
+	// Second pass: delete collected keys
+	for _, key := range keysToDelete {
+		key2, _, err := cursor.SeekExact(key)
+		if err != nil || key2 == nil {
+			return fmt.Errorf("failed to seek to key for deletion: %w", err)
+		}
+		if err := cursor.DeleteCurrent(); err != nil {
+			return fmt.Errorf("failed to delete %s entry: %w", tableName, err)
+		}
+	}
+
+	fmt.Printf("    %s: deleted %d entries before block %d\n", tableName, len(keysToDelete), pruneBeforeBlock)
+	return nil
+}
+
+// partialPruneBlockTables performs partial pruning on block-related tables
+func partialPruneBlockTables(tx kv.RwTx, keepRecentBlocks uint64) error {
+	latestBlock, err := getLatestBlockNumber(tx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest block number: %w", err)
+	}
+
+	fmt.Printf("Latest block number: %d\n", latestBlock)
+	fmt.Printf("Keeping recent %d blocks\n", keepRecentBlocks)
+
+	var pruneBeforeBlock uint64
+	if latestBlock > keepRecentBlocks {
+		pruneBeforeBlock = latestBlock - keepRecentBlocks + 1
+	} else {
+		pruneBeforeBlock = 0
+	}
+
+	fmt.Printf("Will delete data for blocks < %d\n", pruneBeforeBlock)
+
+	if pruneBeforeBlock == 0 {
+		fmt.Printf("No blocks to prune (total blocks <= keep recent blocks)\n")
+		return nil
+	}
+
+	// Tables that support partial pruning (key-based block number)
+	partialPruneTables := []string{
+		"Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader", "TransactionLog",
+	}
+
+	// Process regular tables
+	for _, tableName := range partialPruneTables {
+		err := partialPruneTable(tx, tableName, pruneBeforeBlock)
+		if err != nil {
+			fmt.Printf("    Warning: failed to partially prune %s: %v\n", tableName, err)
+			continue
+		}
+	}
+
+	// Special handling for HeaderNumber (value-based block number)
+	err = partialPruneHeaderNumberTable(tx, pruneBeforeBlock)
+	if err != nil {
+		fmt.Printf("    Warning: failed to partially prune HeaderNumber: %v\n", err)
+	}
+
+	return nil
 }
 
 // checkSMTDatabase checks if SMT database exists and contains data
@@ -260,10 +441,18 @@ func getCriticalTables() map[string]bool {
 	// Critical state table
 	critical["PlainState"] = true
 
+	// Critical account state table (for nonce consistency)
+	critical["AccountChangeSet"] = true
+
 	// Critical block tracking tables (for system operation)
 	critical["LastBlock"] = true
 	critical["LastHeader"] = true
 	critical["MaxTxNum"] = true
+
+	// Critical block data tables (for node operation)
+	critical["Header"] = true
+	critical["CanonicalHeader"] = true
+	critical["HeaderNumber"] = true
 
 	// Critical execution tables (for sequencer operation)
 	critical["LastForkchoice"] = true
@@ -332,7 +521,23 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 			"HashedStorage", "StateAccounts", "StateStorage", "StateCode", "StateCommitment",
 			"HashedAccount", "HashedCodeHash", "PlainCodeHash", "TEVMCode",
 		}
+
+		// Delete non-critical block data tables (方案3)
+		blockDataDeletes := []string{
+			"BlockBody", "Receipt", "TxSender", "TransactionLog",
+			"BlockTransaction", "BlockTransactionLookup",
+		}
 		for _, table := range additionalDeletes {
+			if !critical[table] {
+				for _, existingTable := range allTables {
+					if existingTable == table {
+						toDelete = append(toDelete, table)
+						break
+					}
+				}
+			}
+		}
+		for _, table := range blockDataDeletes {
 			if !critical[table] {
 				for _, existingTable := range allTables {
 					if existingTable == table {
@@ -353,202 +558,6 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 	}
 
 	return toDelete
-}
-
-// partialPruneBlockTables implements partial pruning for block tables
-// Keeps recent N blocks and deletes older historical data
-func partialPruneBlockTables(tx kv.RwTx, keepRecentBlocks uint64) error {
-	fmt.Printf("Starting partial pruning of block tables (keeping recent %d blocks)...\n", keepRecentBlocks)
-
-	// Get the latest block number
-	latestBlockNum, err := getLatestBlockNumber(tx)
-	if err != nil {
-		return fmt.Errorf("failed to get latest block number: %w", err)
-	}
-
-	if latestBlockNum < keepRecentBlocks {
-		fmt.Printf("Latest block (%d) is less than keep threshold (%d), no pruning needed\n", latestBlockNum, keepRecentBlocks)
-		return nil
-	}
-
-	pruneBeforeBlock := latestBlockNum - keepRecentBlocks
-	fmt.Printf("Latest block: %d, will prune blocks before: %d\n", latestBlockNum, pruneBeforeBlock)
-
-	// Tables that need partial pruning - only tables with reliable block number extraction
-	blockTables := []string{
-		"Header", "BlockBody", "Receipt",
-		"TxSender", "CanonicalHeader", "TransactionLog",
-		"HeaderNumber",
-	}
-
-	// NOTE: Excluded problematic tables:
-	// - "BlockTransaction": Uses tx_id as key, not block_num
-	// - "BlockTransactionLookup": Uses transaction_hash as key, not block_num
-
-	for _, tableName := range blockTables {
-		if tableName == "HeaderNumber" {
-			// Special handling for HeaderNumber table (block number in value, not key)
-			if err := partialPruneHeaderNumberTable(tx, pruneBeforeBlock); err != nil {
-				fmt.Printf("Warning: failed to partial prune table %s: %v\n", tableName, err)
-			}
-		} else {
-			if err := partialPruneTable(tx, tableName, pruneBeforeBlock); err != nil {
-				fmt.Printf("Warning: failed to partial prune table %s: %v\n", tableName, err)
-				continue
-			}
-		}
-	}
-
-	fmt.Printf("Partial pruning completed\n")
-	return nil
-}
-
-// partialPruneHeaderNumberTable handles special case for HeaderNumber table
-// HeaderNumber table format: header_hash -> header_num_u64 (block number in VALUE)
-func partialPruneHeaderNumberTable(tx kv.RwTx, pruneBeforeBlock uint64) error {
-	cursor, err := tx.RwCursor("HeaderNumber")
-	if err != nil {
-		return fmt.Errorf("failed to open cursor for HeaderNumber: %w", err)
-	}
-	defer cursor.Close()
-
-	deletedCount := 0
-	keptCount := 0
-
-	for k, v, err := cursor.First(); k != nil; k, v, err = cursor.Next() {
-		if err != nil {
-			return fmt.Errorf("failed to iterate HeaderNumber: %w", err)
-		}
-
-		// Extract block number from VALUE (not key)
-		if len(v) < 8 {
-			// Invalid value, keep it to avoid corruption
-			keptCount++
-			continue
-		}
-
-		blockNum := binary.BigEndian.Uint64(v[:8])
-
-		if blockNum < pruneBeforeBlock {
-			// Delete old block data
-			if err := cursor.DeleteCurrent(); err != nil {
-				return fmt.Errorf("failed to delete entry in HeaderNumber: %w", err)
-			}
-			deletedCount++
-		} else {
-			keptCount++
-		}
-	}
-
-	fmt.Printf("  HeaderNumber: deleted %d old entries, kept %d recent entries\n", deletedCount, keptCount)
-	return nil
-}
-
-// getLatestBlockNumber gets the latest block number from CanonicalHeader table
-func getLatestBlockNumber(tx kv.RwTx) (uint64, error) {
-	cursor, err := tx.Cursor("CanonicalHeader")
-	if err != nil {
-		return 0, err
-	}
-	defer cursor.Close()
-
-	// Get the last key-value pair from CanonicalHeader table
-	// Key format: block_num_u64, Value: header hash
-	k, _, err := cursor.Last()
-	if err != nil {
-		return 0, err
-	}
-	if k == nil {
-		return 0, fmt.Errorf("no blocks found in CanonicalHeader table")
-	}
-
-	// The key IS the block number (8 bytes, big-endian)
-	if len(k) >= 8 {
-		return binary.BigEndian.Uint64(k[:8]), nil
-	}
-
-	return 0, fmt.Errorf("invalid block number format in CanonicalHeader key")
-}
-
-// partialPruneTable removes old entries from a table, keeping only recent blocks
-func partialPruneTable(tx kv.RwTx, tableName string, pruneBeforeBlock uint64) error {
-	cursor, err := tx.RwCursor(tableName)
-	if err != nil {
-		return fmt.Errorf("failed to open cursor for %s: %w", tableName, err)
-	}
-	defer cursor.Close()
-
-	deletedCount := 0
-	keptCount := 0
-
-	for k, _, err := cursor.First(); k != nil; k, _, err = cursor.Next() {
-		if err != nil {
-			return fmt.Errorf("failed to iterate %s: %w", tableName, err)
-		}
-
-		// Extract block number from key (assumes block number is at start of key)
-		blockNum, err := extractBlockNumberFromKey(k, tableName)
-		if err != nil {
-			// If we can't extract block number, keep the entry
-			keptCount++
-			continue
-		}
-
-		if blockNum < pruneBeforeBlock {
-			// Delete old block data
-			if err := cursor.DeleteCurrent(); err != nil {
-				return fmt.Errorf("failed to delete entry in %s: %w", tableName, err)
-			}
-			deletedCount++
-		} else {
-			keptCount++
-		}
-	}
-
-	fmt.Printf("  %s: deleted %d old entries, kept %d recent entries\n", tableName, deletedCount, keptCount)
-	return nil
-}
-
-// extractBlockNumberFromKey extracts block number from table key
-// Different tables have different key formats - see TABLE_FORMATS.md for details
-func extractBlockNumberFromKey(key []byte, tableName string) (uint64, error) {
-	switch tableName {
-	case "Header", "BlockBody":
-		// Format: [8 bytes block_num][32 bytes hash]
-		if len(key) < 8 {
-			return 0, fmt.Errorf("key too short for %s", tableName)
-		}
-		return binary.BigEndian.Uint64(key[:8]), nil
-
-	case "CanonicalHeader", "Receipt":
-		// Format: [8 bytes block_num]
-		if len(key) != 8 {
-			return 0, fmt.Errorf("invalid key length for %s: expected 8, got %d", tableName, len(key))
-		}
-		return binary.BigEndian.Uint64(key), nil
-
-	case "TxSender":
-		// Format: [8 bytes block_num][32 bytes blockHash]
-		if len(key) < 8 {
-			return 0, fmt.Errorf("key too short for %s", tableName)
-		}
-		return binary.BigEndian.Uint64(key[:8]), nil
-
-	case "TransactionLog":
-		// Format: [8 bytes block_num][4 bytes txId]
-		if len(key) < 8 {
-			return 0, fmt.Errorf("key too short for %s", tableName)
-		}
-		return binary.BigEndian.Uint64(key[:8]), nil
-
-	case "HeaderNumber":
-		// Special case: key is header_hash, block number is in VALUE
-		// This will be handled differently in partialPruneTable
-		return 0, fmt.Errorf("HeaderNumber table requires value-based block number extraction")
-
-	default:
-		return 0, fmt.Errorf("unsupported table for block number extraction: %s", tableName)
-	}
 }
 
 func getPruneLevelName(level PruneLevel) string {
@@ -572,35 +581,51 @@ func main() {
 	if len(args) < 1 {
 		log.Error("Usage: prune-chaindata <db_path> [level] [--keep-recent-blocks N]")
 		log.Error("Levels: conservative (default), moderate, aggressive")
-		log.Error("--keep-recent-blocks: Number of recent blocks to keep (default: 100)")
+		log.Error("Options: --keep-recent-blocks N (default: 100, for moderate/aggressive)")
 		os.Exit(1)
 	}
 
 	// Parse arguments
 	dbPath := args[0]
 	pruneLevel := PruneLevelConservative
-	keepRecentBlocks := uint64(100) // default: keep recent 100 blocks
+	keepRecentBlocks := uint64(100) // Default: keep recent 100 blocks
 
 	// Parse pruning level and optional parameters
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
-		switch arg {
-		case "conservative":
+		switch {
+		case arg == "conservative":
 			pruneLevel = PruneLevelConservative
-		case "moderate":
+		case arg == "moderate":
 			pruneLevel = PruneLevelModerate
-		case "aggressive":
+		case arg == "aggressive":
 			pruneLevel = PruneLevelAggressive
-		case "--keep-recent-blocks":
-			if i+1 < len(args) {
-				if blocks, err := strconv.ParseUint(args[i+1], 10, 64); err == nil {
-					keepRecentBlocks = blocks
-					i++ // skip next arg as it's the blocks count
-				} else {
-					log.Error("Invalid value for --keep-recent-blocks, using default 100")
+		case strings.HasPrefix(arg, "--keep-recent-blocks"):
+			if strings.Contains(arg, "=") {
+				// Format: --keep-recent-blocks=N
+				parts := strings.Split(arg, "=")
+				if len(parts) == 2 {
+					if blocks, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
+						keepRecentBlocks = blocks
+					} else {
+						log.Error("Invalid number for --keep-recent-blocks: %s", parts[1])
+						os.Exit(1)
+					}
 				}
 			} else {
-				log.Error("--keep-recent-blocks requires a number, using default 100")
+				// Format: --keep-recent-blocks N
+				if i+1 < len(args) {
+					if blocks, err := strconv.ParseUint(args[i+1], 10, 64); err == nil {
+						keepRecentBlocks = blocks
+						i++ // Skip next argument
+					} else {
+						log.Error("Invalid number for --keep-recent-blocks: %s", args[i+1])
+						os.Exit(1)
+					}
+				} else {
+					log.Error("--keep-recent-blocks requires a number")
+					os.Exit(1)
+				}
 			}
 		default:
 			// If it's not a flag and not the first arg (db path), check if it's a level
@@ -627,7 +652,9 @@ func main() {
 	fmt.Printf("Chaindata path: %s\n", dbMainDBPath)
 	fmt.Printf("SMT path: %s\n", dbSMTDBPath)
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
-	fmt.Printf("Keep recent blocks: %d\n", keepRecentBlocks)
+	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
+		fmt.Printf("Keep recent blocks: %d\n", keepRecentBlocks)
+	}
 
 	// Check if chaindata database file exists
 	if _, err := os.Stat(dbMainDBPath + "/mdbx.dat"); os.IsNotExist(err) {
@@ -745,7 +772,7 @@ func main() {
 	}
 	defer tx.Rollback()
 
-	// Step 1: Perform partial pruning for block tables (keep recent blocks)
+	// Perform partial pruning for moderate/aggressive levels first
 	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
 		fmt.Printf("\nPerforming partial pruning of block tables...\n")
 		err = partialPruneBlockTables(tx, keepRecentBlocks)
@@ -755,10 +782,6 @@ func main() {
 		}
 	}
 
-	// Step 2: Execute full table deletion (for non-block tables)
-	fmt.Printf("\nStarting table deletion...\n")
-	deletedCount := 0
-
 	// Filter out block tables from full deletion if we did partial pruning
 	partiallyPrunedTables := map[string]bool{
 		"Header": true, "BlockBody": true, "Receipt": true,
@@ -766,8 +789,9 @@ func main() {
 		"TransactionLog": true, "HeaderNumber": true,
 	}
 
-	// NOTE: BlockTransaction and BlockTransactionLookup are NOT in the list
-	// because they were excluded from partial pruning due to key format issues
+	// Execute table deletion
+	fmt.Printf("\nStarting table deletion...\n")
+	deletedCount := 0
 
 	for _, table := range toDelete {
 		// Skip block tables if we did partial pruning
@@ -784,8 +808,6 @@ func main() {
 			deletedCount++
 		}
 	}
-
-	// Step 3: Partial pruning automatically preserves recent data, no restoration needed
 
 	// Commit transaction
 	err = tx.Commit()
@@ -804,117 +826,4 @@ func main() {
 		fmt.Printf("\nNote: Aggressive pruning has cleared all block, transaction, and state data!\n")
 		fmt.Printf("Only essential operational data remains for sequencer operation.\n")
 	}
-}
-
-// saveLatestBlockInfo saves latest block info to prevent startup crash after cleanup
-func saveLatestBlockInfo(tx kv.RwTx, toDelete []string) (*LatestBlockInfo, error) {
-	fmt.Printf("Saving latest block info before deletion...\n")
-
-	// Check if critical block tables will be deleted
-	deleteBlockTables := false
-	blockTablesMap := map[string]bool{
-		"Header": true, "BlockBody": true, "BlockTransaction": true,
-		"HeaderNumber": true, "CanonicalHeader": true,
-	}
-
-	for _, table := range toDelete {
-		if blockTablesMap[table] {
-			deleteBlockTables = true
-			break
-		}
-	}
-
-	if !deleteBlockTables {
-		fmt.Printf("Block tables won't be deleted, skipping backup...\n")
-		return nil, nil
-	}
-
-	// Get latest block number
-	latestBlockNum, err := rpchelper.GetLatestFinishedBlockNumber(tx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get latest block number: %w", err)
-	}
-
-	if latestBlockNum == 0 {
-		fmt.Printf("No blocks found, skipping backup...\n")
-		return nil, nil
-	}
-
-	// Get latest block hash
-	latestHash, err := rawdb.ReadCanonicalHash(tx, latestBlockNum)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read canonical hash for block %d: %w", latestBlockNum, err)
-	}
-	if latestHash == (common.Hash{}) {
-		return nil, fmt.Errorf("canonical hash not found for block %d", latestBlockNum)
-	}
-
-	// Get latest block header
-	header := rawdb.ReadHeader(tx, latestHash, latestBlockNum)
-	if header == nil {
-		return nil, fmt.Errorf("failed to read header for block %d", latestBlockNum)
-	}
-
-	// Get block body info (mainly transaction count)
-	body, err := rawdb.ReadBodyWithTransactions(tx, latestHash, latestBlockNum)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read block body for block %d: %w", latestBlockNum, err)
-	}
-
-	txCount := 0
-	if body != nil && body.Transactions != nil {
-		txCount = len(body.Transactions)
-	}
-
-	blockInfo := &LatestBlockInfo{
-		Number:      latestBlockNum,
-		Hash:        latestHash,
-		Header:      header,
-		TxCount:     txCount,
-		NeedRestore: true,
-	}
-
-	fmt.Printf("Saved latest block info: block %d, hash %s, %d transactions\n",
-		blockInfo.Number, blockInfo.Hash.Hex()[:10], blockInfo.TxCount)
-
-	return blockInfo, nil
-}
-
-// restoreLatestBlockInfo restores essential latest block info to ensure node can start normally
-func restoreLatestBlockInfo(tx kv.RwTx, blockInfo *LatestBlockInfo) error {
-	if blockInfo == nil || !blockInfo.NeedRestore {
-		return nil
-	}
-
-	fmt.Printf("Restoring latest block info...\n")
-
-	// Restore block header
-	if err := rawdb.WriteHeader(tx, blockInfo.Header); err != nil {
-		return fmt.Errorf("failed to restore header: %w", err)
-	}
-
-	// Restore canonical hash mapping
-	if err := rawdb.WriteCanonicalHash(tx, blockInfo.Hash, blockInfo.Number); err != nil {
-		return fmt.Errorf("failed to restore canonical hash: %w", err)
-	}
-
-	// Create an empty block body but preserve correct transaction count
-	// This is sufficient for gas price suggester
-	emptyBody := &types.BodyForStorage{
-		BaseTxId:    0,
-		TxAmount:    uint32(blockInfo.TxCount), // Preserve correct transaction count
-		Uncles:      nil,
-		Withdrawals: nil,
-	}
-
-	if err := rawdb.WriteBodyForStorage(tx, blockInfo.Hash, blockInfo.Number, emptyBody); err != nil {
-		return fmt.Errorf("failed to restore block body: %w", err)
-	}
-
-	// Restore LastHeader info
-	if err := rawdb.WriteHeadHeaderHash(tx, blockInfo.Hash); err != nil {
-		return fmt.Errorf("failed to restore head header hash: %w", err)
-	}
-
-	return nil
 }

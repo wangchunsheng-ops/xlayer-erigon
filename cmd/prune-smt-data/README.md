@@ -126,7 +126,7 @@ For detailed analysis of all database tables:
 
 ## 🔒 Critical Tables (NEVER DELETED)
 
-**Total: 28 tables that are ALWAYS preserved regardless of pruning level**
+**Total: 29 tables that are ALWAYS preserved regardless of pruning level**
 
 <details>
 <summary>📋 Click to view all critical tables</summary>
