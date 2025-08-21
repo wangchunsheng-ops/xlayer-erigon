@@ -1371,6 +1371,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.forkValidator,
 				backend.engine,
 				backend.l1Syncer,
+				backend.l1Syncer,
 				backend.l1BlockSyncer,
 				streamClient,
 				dataStreamServer,

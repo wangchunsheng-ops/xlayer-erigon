@@ -246,6 +246,7 @@ func SequencerZkStages(
 func DefaultZkStages(
 	ctx context.Context,
 	l1SyncerCfg L1SyncerCfg,
+	l1SequencerSyncCfg L1SequencerSyncCfg,
 	l1InfoTreeCfg L1InfoTreeCfg,
 	sequencerL1BlockSyncCfg SequencerL1BlockSyncCfg,
 	batchesCfg BatchesCfg,
@@ -313,6 +314,19 @@ func DefaultZkStages(
 					return nil
 				}
 				return PruneSequencerL1BlockSyncStage(p, tx, sequencerL1BlockSyncCfg, ctx, logger)
+			},
+		},
+		{
+			ID:          stages2.L1SequencerSyncer,
+			Description: "L1 Sequencer Sync Updates",
+			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, u stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
+				return SpawnL1SequencerSyncStage(s, u, txc.Tx, l1SequencerSyncCfg, ctx, logger)
+			},
+			Unwind: func(firstCycle bool, u *stages.UnwindState, s *stages.StageState, txc wrap.TxContainer, logger log.Logger) error {
+				return UnwindL1SequencerSyncStage(u, txc.Tx, l1SequencerSyncCfg, ctx)
+			},
+			Prune: func(firstCycle bool, p *stages.PruneState, tx kv.RwTx, logger log.Logger) error {
+				return PruneL1SequencerSyncStage(p, tx, l1SequencerSyncCfg, ctx)
 			},
 		},
 		{
