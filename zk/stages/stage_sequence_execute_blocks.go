@@ -17,6 +17,7 @@ import (
 	"github.com/ledgerwatch/erigon/zk/hermez_db"
 	"github.com/ledgerwatch/erigon/zk/metrics"
 	zktypes "github.com/ledgerwatch/erigon/zk/types"
+	"github.com/ledgerwatch/log/v3"
 	"github.com/ledgerwatch/secp256k1"
 )
 
@@ -86,9 +87,15 @@ func doFinishBlockAndUpdateState(
 		return nil, err
 	}
 
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here6")
+
 	if err := updateSequencerProgress(batchContext.sdb.tx, thisBlockNumber, batchState.batchNumber, false); err != nil {
 		return nil, err
 	}
+
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here7")
 
 	if batchContext.cfg.accumulator != nil {
 		txs, err := rawdb.RawTransactionsRange(batchContext.sdb.tx, thisBlockNumber, thisBlockNumber)
@@ -97,6 +104,9 @@ func doFinishBlockAndUpdateState(
 		}
 		batchContext.cfg.accumulator.ChangeTransactions(txs)
 	}
+
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here8")
 
 	return block, nil
 }
@@ -193,6 +203,9 @@ func finaliseBlock(
 	// For X Layer
 	metrics.GetLogStatistics().CumulativeTiming(metrics.ZkIncIntermediateHashesTiming, time.Since(zkIncStart))
 
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here1")
+
 	doFinStart := time.Now()
 	finalHeader := finalBlock.HeaderNoCopy()
 	finalHeader.Root = newRoot
@@ -219,6 +232,9 @@ func finaliseBlock(
 		return nil, fmt.Errorf("failed to write body: %v", err)
 	}
 
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here2")
+
 	// write the new block lookup entries
 	rawdb.WriteTxLookupEntries(batchContext.sdb.tx, finalBlock)
 
@@ -240,10 +256,16 @@ func finaliseBlock(
 		return nil, fmt.Errorf("write block batch error: %v", err)
 	}
 
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here3")
+
 	// For X Layer
 	metrics.GetLogStatistics().CumulativeTiming(metrics.FinaliseBlockWriteTiming, time.Since(doFinStart))
 
 	// Batch counters writing removed
+
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here4")
 
 	// this is actually account + storage indices stages
 	quitCh := batchContext.ctx.Done()
@@ -258,6 +280,9 @@ func finaliseBlock(
 	if err = stagedsync.PromoteHistory(batchContext.s.LogPrefix(), batchContext.sdb.tx, kv.StorageChangeSet, from, to, *batchContext.historyCfg, quitCh); err != nil {
 		return nil, err
 	}
+
+	// Add extra logging to debug blocktime issue
+	log.Info("XXX Here5")
 
 	return finalBlock, nil
 }

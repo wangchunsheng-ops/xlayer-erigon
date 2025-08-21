@@ -774,13 +774,24 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+
+			// Add extra logging to debug blocktime issue
+			log.Info("XXX Here9")
+
 			blockCache := batchContext.sdb.eridb.RetriveAndCleanCache()
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+
+			// Add extra logging to debug blocktime issue
+			log.Info("XXX Here10")
+
 			setTime := time.Now()
 			s.SetSmtCache(blockNumber, blockCache)
 			metrics.GetLogStatistics().CumulativeTiming(metrics.SetSmtCacheTiming, time.Since(setTime))
+
+			// Add extra logging to debug blocktime issue
+			log.Info("XXX Here11")
 		} else {
 			quit := batchContext.ctx.Done()
 			batchContext.sdb.eridb.OpenBatch(quit)
@@ -788,9 +799,16 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+
+			// Add extra logging to debug blocktime issue
+			log.Info("XXX Here12")
+
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+
+			// Add extra logging to debug blocktime issue
+			log.Info("XXX Here13")
 		}
 
 		// For X Layer
@@ -799,8 +817,14 @@ BatchLoop:
 		metrics.SeqTxCount.Add(float64(len(batchState.blockState.builtBlockElements.transactions)))
 		metrics.GetLogStatistics().CumulativeValue(metrics.TxCounter, int64(len(batchState.blockState.builtBlockElements.transactions)))
 
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here14")
+
 		// add a check to the verifier and also check for responses
 		batchState.onBuiltBlock(blockNumber)
+
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here15")
 
 		// check if we are in limbo recovery and update the pool with the new state root for the latest transaction
 		// being checked then return before committing anything about the block to the DB
@@ -810,8 +834,14 @@ BatchLoop:
 			return fmt.Errorf("[%s] %w: %s = %s", s.LogPrefix(), zk.ErrLimboState, batchState.limboRecoveryData.limboTxHash.Hex(), stateRoot.Hex())
 		}
 
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here16")
+
 		// For X Layer
 		txpool.ArquireTxPoolLock(true)
+
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here17")
 
 		if !batchState.isL1Recovery() {
 			commitTime := time.Now()
@@ -824,16 +854,25 @@ BatchLoop:
 			metrics.GetLogStatistics().CumulativeTiming(metrics.BatchCommitDBTiming, time.Since(commitTime))
 		}
 
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here18")
+
 		// remove mined transactions from the pool
 		toRemove := append(batchState.blockState.builtBlockElements.txSlots, batchState.blockState.transactionsToDiscard...)
 		if err := cfg.txPool.RemoveMinedTransactions(ctx, sdb.tx, header.GasLimit, toRemove); err != nil {
 			return err
 		}
 
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here19")
+
 		// now trigger sender state changes in the pool where we encountered nonce issues during execution
 		if err := cfg.txPool.TriggerSenderStateChanges(ctx, sdb.tx, header.GasLimit, sendersToTriggerStatechanges); err != nil {
 			return err
 		}
+
+		// Add extra logging to debug blocktime issue
+		log.Info("XXX Here20")
 
 		t.LogTimer()
 		gasPerSecond := float64(0)
