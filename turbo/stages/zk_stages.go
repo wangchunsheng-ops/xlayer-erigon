@@ -40,7 +40,7 @@ func NewDefaultZkStages(ctx context.Context,
 	engine consensus.Engine,
 	l1Syncer *syncer.L1Syncer,
 	l1BlockSyncer *syncer.L1Syncer, // Added: Support for Sequencer L1 block sync
-	sequencerL1Syncer *syncer.L1Syncer, // Added: RPC node specific Sequencer L1 syncer (Sequencer node passes nil)
+	sequencerL1Syncer *syncer.L1Syncer, // Added: Support for Sequencer L1 syncer
 	datastreamClient zkStages.DatastreamClient,
 	dataStreamServer server.DataStreamServer,
 	infoTreeUpdater *l1infotree.Updater,
@@ -59,24 +59,20 @@ func NewDefaultZkStages(ctx context.Context,
 	// Hence we run it in the test mode.
 	runInTestMode := cfg.ImportMode
 
-	// Build stage configuration parameters
-	l1SyncerCfg := zkStages.StageL1SyncerCfg(db, l1Syncer, cfg.Zk)
-	l1InfoTreeCfg := zkStages.StageL1InfoTreeCfg(db, cfg.Zk, infoTreeUpdater)
-
 	var l1SequencerSyncCfg zkStages.L1SequencerSyncCfg
 	var sequencerL1BlockSyncCfg zkStages.SequencerL1BlockSyncCfg
 
-	// If RPC node (sequencerL1Syncer != nil), configure Sequencer sync stages
+	// If nill, will skip the stage
 	if sequencerL1Syncer != nil {
 		l1SequencerSyncCfg = zkStages.StageL1SequencerSyncCfg(db, cfg.Zk, sequencerL1Syncer)
 		sequencerL1BlockSyncCfg = zkStages.StageSequencerL1BlockSyncCfg(db, cfg.Zk, l1BlockSyncer)
 	}
 
 	return zkStages.DefaultZkStages(ctx,
-		l1SyncerCfg,
-		l1SequencerSyncCfg, // RPC node has value, Sequencer node is empty
-		l1InfoTreeCfg,
-		sequencerL1BlockSyncCfg, // RPC node has value, Sequencer node is empty
+		zkStages.StageL1SyncerCfg(db, l1Syncer, cfg.Zk),
+		l1SequencerSyncCfg, // Added: Support for Sequencer L1 syncer
+		zkStages.StageL1InfoTreeCfg(db, cfg.Zk, infoTreeUpdater),
+		sequencerL1BlockSyncCfg, // Added: Support for Sequencer L1 syncer
 		zkStages.StageBatchesCfg(db, datastreamClient, cfg.Zk, controlServer.ChainConfig, &cfg.Miner),
 		zkStages.StageDataStreamCatchupCfg(dataStreamServer, db, cfg.Genesis.Config.ChainID.Uint64(), cfg.DatastreamVersion),
 		stagedsync.StageBlockHashesCfg(db, dirs.Tmp, controlServer.ChainConfig, blockWriter),
