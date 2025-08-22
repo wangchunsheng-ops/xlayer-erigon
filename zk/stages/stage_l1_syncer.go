@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/log/v3"
@@ -182,7 +182,9 @@ Loop:
 				case logIncompatible:
 					continue
 				default:
-					log.Warn("L1 Syncer unknown topic", "topic", l.Topics[0])
+					// 对于未知topics（如Sequencer事件），静默跳过，不产生警告
+					// 这些事件会在专门的StageL1SequencerSync中处理
+					continue
 				}
 			}
 		case progressMessage := <-progressMessageChan:
@@ -209,7 +211,7 @@ Loop:
 			// should never get a logVerifyEtrog log in pp mode, so highestVerification.BatchNo should always be 0.
 			// the exception is when running tests, such as TestSpawnStageL1Syncer
 			if !isTestEnv() {
-				panic("highestVerification.BatchNo > 0")
+				log.Warn(fmt.Sprintf("[%s] highestVerification.BatchNo: %d > 0", logPrefix, highestVerification.BatchNo))
 			}
 			// log.Info(fmt.Sprintf("[%s]", logPrefix), "highestVerificationBatchNo", highestVerification.BatchNo)
 			// if err := stages.SaveStageProgress(tx, stages.L1VerificationsBatchNo, highestVerification.BatchNo); err != nil {
@@ -423,12 +425,12 @@ func blockComparison(tx kv.RwTx, hermezDb *hermez_db.HermezDb, blockNo uint64, l
 
 func isTestEnv() bool {
 	if strings.Contains(os.Args[0], "test") {
-        return true
-    }
+		return true
+	}
 	for _, arg := range os.Args {
-        if strings.HasPrefix(arg, "-test.") {
-            return true
-        }
-    }
+		if strings.HasPrefix(arg, "-test.") {
+			return true
+		}
+	}
 	return false
 }

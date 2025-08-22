@@ -39,6 +39,8 @@ func NewDefaultZkStages(ctx context.Context,
 	forkValidator *engine_helpers.ForkValidator,
 	engine consensus.Engine,
 	l1Syncer *syncer.L1Syncer,
+	l1BlockSyncer *syncer.L1Syncer, // 添加：支持Sequencer L1区块同步
+	sequencerL1Syncer *syncer.L1Syncer, // 添加：RPC节点专用的Sequencer L1同步器（Sequencer节点传nil）
 	datastreamClient zkStages.DatastreamClient,
 	dataStreamServer server.DataStreamServer,
 	infoTreeUpdater *l1infotree.Updater,
@@ -57,9 +59,24 @@ func NewDefaultZkStages(ctx context.Context,
 	// Hence we run it in the test mode.
 	runInTestMode := cfg.ImportMode
 
+	// 构建stage配置参数
+	l1SyncerCfg := zkStages.StageL1SyncerCfg(db, l1Syncer, cfg.Zk)
+	l1InfoTreeCfg := zkStages.StageL1InfoTreeCfg(db, cfg.Zk, infoTreeUpdater)
+
+	var l1SequencerSyncCfg zkStages.L1SequencerSyncCfg
+	var sequencerL1BlockSyncCfg zkStages.SequencerL1BlockSyncCfg
+
+	// 如果是RPC节点（sequencerL1Syncer != nil），配置Sequencer同步stages
+	if sequencerL1Syncer != nil {
+		l1SequencerSyncCfg = zkStages.StageL1SequencerSyncCfg(db, cfg.Zk, sequencerL1Syncer)
+		sequencerL1BlockSyncCfg = zkStages.StageSequencerL1BlockSyncCfg(db, cfg.Zk, l1BlockSyncer)
+	}
+
 	return zkStages.DefaultZkStages(ctx,
-		zkStages.StageL1SyncerCfg(db, l1Syncer, cfg.Zk),
-		zkStages.StageL1InfoTreeCfg(db, cfg.Zk, infoTreeUpdater),
+		l1SyncerCfg,
+		l1SequencerSyncCfg, // RPC节点有值，Sequencer节点为空
+		l1InfoTreeCfg,
+		sequencerL1BlockSyncCfg, // RPC节点有值，Sequencer节点为空
 		zkStages.StageBatchesCfg(db, datastreamClient, cfg.Zk, controlServer.ChainConfig, &cfg.Miner),
 		zkStages.StageDataStreamCatchupCfg(dataStreamServer, db, cfg.Genesis.Config.ChainID.Uint64(), cfg.DatastreamVersion),
 		stagedsync.StageBlockHashesCfg(db, dirs.Tmp, controlServer.ChainConfig, blockWriter),

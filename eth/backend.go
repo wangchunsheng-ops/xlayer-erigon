@@ -1147,6 +1147,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			}}
 			l1Contracts = []libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup}
 		} else {
+			// RPC节点：只同步原有的验证事件，保持原有逻辑不变
 			l1Topics = seqAndVerifTopics
 			l1Contracts = seqAndVerifL1Contracts
 		}
@@ -1203,7 +1204,47 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		// For X Layer, apollo
 		backend.l1InfoTreeSyncer = l1InfoTreeSyncer
 
+		// RPC和Sequencer都使用相同的L1InfoTree配置，问题不在这里
 		l1InfoTreeUpdater := l1infotree.NewUpdater(cfg.Zk, l1InfoTreeSyncer)
+
+		// 所有节点都需要l1BlockSyncer（Sequencer节点用于自身功能）
+		l1BlockSyncer := syncer.NewL1Syncer(
+			ctx,
+			ethermanClients,
+			[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+			[][]libcommon.Hash{{
+				contracts.SequenceBatchesTopic,
+			}},
+			cfg.L1BlockRange,
+			cfg.L1QueryDelay,
+			cfg.L1HighestBlockType,
+			cfg.Zk.XLayer.GetLogsTimeout,
+			cfg.Zk.XLayer.GetLogsRetries,
+		)
+
+		// 只有RPC节点才需要额外的Sequencer L1事件同步器
+		var sequencerL1Syncer *syncer.L1Syncer
+		if !isSequencer {
+			sequencerL1Syncer = syncer.NewL1Syncer(
+				ctx,
+				ethermanClients,
+				[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+				[][]libcommon.Hash{{
+					contracts.InitialSequenceBatchesTopic,
+					contracts.AddNewRollupTypeTopic,
+					contracts.AddNewRollupTypeTopicBanana,
+					contracts.CreateNewRollupTopic,
+					contracts.UpdateRollupTopic,
+				}},
+				cfg.L1BlockRange,
+				cfg.L1QueryDelay,
+				cfg.L1HighestBlockType,
+				cfg.Zk.XLayer.GetLogsTimeout,
+				cfg.Zk.XLayer.GetLogsRetries,
+			)
+
+			log.Info("RPC node: Created dedicated Sequencer L1 syncer for event pre-synchronization")
+		}
 
 		var dataStreamServer server.DataStreamServer
 		if backend.streamServer != nil {
@@ -1216,20 +1257,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			// we need to make sure the pool is always aware of the latest block for when
 			// we switch context from being an RPC node to a sequencer
 			backend.txPool2.ForceUpdateLatestBlock(executionProgress)
-
-			l1BlockSyncer := syncer.NewL1Syncer(
-				ctx,
-				ethermanClients,
-				[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
-				[][]libcommon.Hash{{
-					contracts.SequenceBatchesTopic,
-				}},
-				cfg.L1BlockRange,
-				cfg.L1QueryDelay,
-				cfg.L1HighestBlockType,
-				cfg.Zk.XLayer.GetLogsTimeout,
-				cfg.Zk.XLayer.GetLogsRetries,
-			)
 
 			// For X Layer, apollo
 			backend.l1BlockSyncer = l1BlockSyncer
@@ -1339,6 +1366,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.forkValidator,
 				backend.engine,
 				backend.l1Syncer,
+				l1BlockSyncer,     // 添加：L1区块同步器
+				sequencerL1Syncer, // 添加：RPC节点专用的Sequencer L1同步器
 				streamClient,
 				dataStreamServer,
 				l1InfoTreeUpdater,

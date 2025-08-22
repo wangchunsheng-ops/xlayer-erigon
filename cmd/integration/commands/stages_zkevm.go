@@ -160,8 +160,8 @@ func newSyncZk(ctx context.Context, db, dbsmt kv.RwDB) (consensus.Engine, *vm.Co
 			nil,
 			engine,
 			nil,
-			nil,
-			nil,
+			nil, // l1BlockSyncer
+			nil, // sequencerL1Syncer (Sequencer节点传nil)
 			nil,
 			nil,
 			nil,

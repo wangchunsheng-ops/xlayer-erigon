@@ -245,7 +245,9 @@ func SequencerZkStages(
 func DefaultZkStages(
 	ctx context.Context,
 	l1SyncerCfg L1SyncerCfg,
+	l1SequencerSyncCfg L1SequencerSyncCfg, // 添加：支持Sequencer L1事件同步
 	l1InfoTreeCfg L1InfoTreeCfg,
+	sequencerL1BlockSyncCfg SequencerL1BlockSyncCfg, // 添加：支持Sequencer L1区块同步
 	batchesCfg BatchesCfg,
 	dataStreamCatchupCfg DataStreamCatchupCfg,
 	blockHashCfg stages.BlockHashesCfg,
@@ -278,6 +280,29 @@ func DefaultZkStages(
 			},
 		},
 		{
+			ID:          stages2.L1SequencerSyncer,
+			Description: "L1 Sequencer Sync Updates",
+			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, u stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
+				// 只有RPC节点（l1SequencerSyncCfg.syncer != nil）才执行此stage
+				if l1SequencerSyncCfg.syncer != nil {
+					return SpawnL1SequencerSyncStage(s, u, txc.Tx, l1SequencerSyncCfg, ctx, logger)
+				}
+				return nil // Sequencer节点跳过
+			},
+			Unwind: func(firstCycle bool, u *stages.UnwindState, s *stages.StageState, txc wrap.TxContainer, logger log.Logger) error {
+				if l1SequencerSyncCfg.syncer != nil {
+					return UnwindL1SequencerSyncStage(u, txc.Tx, l1SequencerSyncCfg, ctx)
+				}
+				return nil
+			},
+			Prune: func(firstCycle bool, p *stages.PruneState, tx kv.RwTx, logger log.Logger) error {
+				if l1SequencerSyncCfg.syncer != nil {
+					return PruneL1SequencerSyncStage(p, tx, l1SequencerSyncCfg, ctx)
+				}
+				return nil
+			},
+		},
+		{
 			ID:          stages2.L1InfoTree,
 			Description: "L1 Info tree index updates sync",
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, u stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
@@ -288,6 +313,29 @@ func DefaultZkStages(
 			},
 			Prune: func(firstCycle bool, p *stages.PruneState, tx kv.RwTx, logger log.Logger) error {
 				return PruneL1InfoTreeStage(p, tx, l1InfoTreeCfg, ctx)
+			},
+		},
+		{
+			ID:          stages2.L1BlockSync,
+			Description: "L1 Sequencer L1 Block Sync",
+			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, unwinder stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
+				// 只有RPC节点（sequencerL1BlockSyncCfg.syncer != nil）才执行此stage
+				if sequencerL1BlockSyncCfg.syncer != nil {
+					return SpawnSequencerL1BlockSyncStage(s, unwinder, ctx, txc.Tx, sequencerL1BlockSyncCfg, logger)
+				}
+				return nil // Sequencer节点跳过
+			},
+			Unwind: func(firstCycle bool, u *stages.UnwindState, s *stages.StageState, txc wrap.TxContainer, logger log.Logger) error {
+				if sequencerL1BlockSyncCfg.syncer != nil {
+					return UnwindSequencerL1BlockSyncStage(u, txc.Tx, sequencerL1BlockSyncCfg, ctx)
+				}
+				return nil
+			},
+			Prune: func(firstCycle bool, p *stages.PruneState, tx kv.RwTx, logger log.Logger) error {
+				if sequencerL1BlockSyncCfg.syncer != nil {
+					return PruneSequencerL1BlockSyncStage(p, tx, sequencerL1BlockSyncCfg, ctx, logger)
+				}
+				return nil
 			},
 		},
 		{
