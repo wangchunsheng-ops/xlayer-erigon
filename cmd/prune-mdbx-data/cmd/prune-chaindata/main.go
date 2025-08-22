@@ -28,6 +28,7 @@ type PruneLevel int
 const (
 	PruneLevelConservative PruneLevel = iota // Conservative pruning
 	PruneLevelModerate                       // Moderate pruning
+	PruneLevelAggressive                     // Aggressive pruning (includes state data cleanup)
 )
 
 // LatestBlockInfo stores essential information of the latest block
@@ -401,6 +402,141 @@ func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
 	return nil
 }
 
+// pruneHistoricalStateData performs aggressive cleanup of historical AccountChangeSet and StorageChangeSet data
+// while preserving recent batches for operational needs
+func pruneHistoricalStateData(tx kv.RwTx, keepRecentBatches uint64) (int, error) {
+	fmt.Printf("Starting historical state data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
+
+	// Get the range of blocks to delete (everything except recent batches)
+	latestBlock, err := getLatestBlockNumber(tx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get latest block number: %w", err)
+	}
+
+	// Calculate cutoff point - we need to determine which blocks correspond to recent batches
+	hermezDb := hermez_db.NewHermezDb(tx)
+	latestBatch, err := hermezDb.GetLatestDownloadedBatchNo()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get latest batch number: %w", err)
+	}
+
+	var cutoffBatch uint64
+	if latestBatch >= keepRecentBatches {
+		cutoffBatch = latestBatch - keepRecentBatches
+	} else {
+		// If we have fewer batches than we want to keep, don't delete anything
+		fmt.Printf("Only %d batches exist, keeping all (requested to keep %d)\n", latestBatch, keepRecentBatches)
+		return 0, nil
+	}
+
+	// Find the first block of the cutoff batch to determine block-level cutoff
+	cutoffBlock, found, err := hermezDb.GetLowestBlockInBatch(cutoffBatch + 1) // +1 because we want to keep this batch
+	if err != nil {
+		return 0, fmt.Errorf("failed to get first block of batch %d: %w", cutoffBatch+1, err)
+	}
+	if !found {
+		fmt.Printf("No blocks found in batch %d, using latest block as cutoff\n", cutoffBatch+1)
+		cutoffBlock = latestBlock // Use latest block as fallback
+	}
+
+	fmt.Printf("Deleting state data for blocks 0-%d (keeping blocks %d-%d, batches %d-%d)\n",
+		cutoffBlock-1, cutoffBlock, latestBlock, cutoffBatch+1, latestBatch)
+
+	deletedRecords := 0
+
+	// Clean AccountChangeSet data
+	accountDeletedCount, err := pruneAccountChangeSetBeforeBlock(tx, cutoffBlock)
+	if err != nil {
+		return deletedRecords, fmt.Errorf("failed to prune AccountChangeSet: %w", err)
+	}
+	deletedRecords += accountDeletedCount
+	fmt.Printf("✓ Deleted %d AccountChangeSet records\n", accountDeletedCount)
+
+	// Clean StorageChangeSet data
+	storageDeletedCount, err := pruneStorageChangeSetBeforeBlock(tx, cutoffBlock)
+	if err != nil {
+		return deletedRecords, fmt.Errorf("failed to prune StorageChangeSet: %w", err)
+	}
+	deletedRecords += storageDeletedCount
+	fmt.Printf("✓ Deleted %d StorageChangeSet records\n", storageDeletedCount)
+
+	return deletedRecords, nil
+}
+
+// pruneAccountChangeSetBeforeBlock deletes AccountChangeSet records before specified block
+func pruneAccountChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+	cursor, err := tx.RwCursorDupSort("AccountChangeSet")
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close()
+
+	deletedCount := 0
+	cutoffKey := make([]byte, 8)
+	binary.BigEndian.PutUint64(cutoffKey, cutoffBlock)
+
+	// Iterate through all keys before cutoff block
+	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.NextNoDup() {
+		if err != nil {
+			return deletedCount, err
+		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached the cutoff, stop deleting
+			}
+
+			// Delete all entries for this block (there might be multiple accounts)
+			for _, _, err := cursor.SeekExact(key); err == nil; _, _, err = cursor.NextDup() {
+				if err := cursor.DeleteCurrent(); err != nil {
+					return deletedCount, err
+				}
+				deletedCount++
+			}
+		}
+	}
+
+	return deletedCount, nil
+}
+
+// pruneStorageChangeSetBeforeBlock deletes StorageChangeSet records before specified block
+func pruneStorageChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+	cursor, err := tx.RwCursorDupSort("StorageChangeSet")
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close()
+
+	deletedCount := 0
+
+	// StorageChangeSet key format: block_number + address + incarnation
+	// We need to delete all entries where block_number < cutoffBlock
+	blockPrefix := make([]byte, 8)
+	for blockNum := uint64(0); blockNum < cutoffBlock; blockNum++ {
+		binary.BigEndian.PutUint64(blockPrefix, blockNum)
+
+		// Delete all storage changes for this block
+		for key, _, err := cursor.Seek(blockPrefix); key != nil && len(key) >= 8; key, _, err = cursor.Next() {
+			if err != nil {
+				return deletedCount, err
+			}
+
+			keyBlockNum := binary.BigEndian.Uint64(key[:8])
+			if keyBlockNum != blockNum {
+				break // Moved to next block
+			}
+
+			if err := cursor.DeleteCurrent(); err != nil {
+				return deletedCount, err
+			}
+			deletedCount++
+		}
+	}
+
+	return deletedCount, nil
+}
+
 // deleteCompositeKeyData deletes data from tables with composite keys (block_number + hash)
 func deleteCompositeKeyData(tx kv.RwTx, blockNo uint64) error {
 	// Tables with composite key format: block_number_u64 + hash
@@ -519,8 +655,8 @@ func getTableList(db kv.RwDB) ([]string, error) {
 	return tables, nil
 }
 
-// getTableStats gets statistics info of table
-func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint64, uint64, error) {
+// getTableStats gets statistics info of table (using default pageSize)
+func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error) {
 	ctx := context.Background()
 	tx, err := db.BeginRo(ctx)
 	if err != nil {
@@ -535,7 +671,9 @@ func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint6
 		}
 
 		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
-		sizeBytes := totalPages * pageSize
+		// Use default MDBX page size of 8192 bytes
+		const defaultPageSize = 8192
+		sizeBytes := totalPages * defaultPageSize
 
 		return stat.Entries, sizeBytes, totalPages, nil
 	}
@@ -543,7 +681,7 @@ func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint6
 	return 0, 0, 0, fmt.Errorf("not MDBX transaction")
 }
 
-// openDatabase opens database at specified path and returns related info
+// openDatabase opens database at specified path using the safest possible approach
 func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *mdbx2.EnvInfo, error) {
 	ctx := context.Background()
 
@@ -556,38 +694,16 @@ func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *md
 		opts = mdbxpkg.NewMDBX(log).Path(dbPath).Label(label)
 	}
 
-	// Get database info
-	env, err := mdbx2.NewEnv()
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to create env: %w", err)
-	}
-
-	err = env.Open(dbPath, opts.GetFlags(), 0664)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to open env: %w", err)
-	}
-
-	in, err := env.Info(nil)
-	if err != nil {
-		env.Close()
-		return nil, nil, fmt.Errorf("Failed to get env info: %w", err)
-	}
-	env.Close()
-
-	newMapSize := datasize.ByteSize(in.MapSize)
-
-	// Open database with conservative flags to match sequencer
-	db, err := opts.Flags(func(flags uint) uint {
-		// Use conservative flags that match sequencer defaults
-		// Remove problematic flags and use standard configuration
-		return uint(mdbx2.NoReadahead | mdbx2.Coalesce | mdbx2.Durable)
-	}).PageSize(uint64(in.PageSize)).MapSize(newMapSize).Open(ctx)
-
+	// Use the simplest possible approach: let MDBX use its default configuration
+	// This avoids all geometry mismatch issues
+	db, err := opts.Open(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to open database: %w", err)
 	}
 
-	return db, in, nil
+	fmt.Printf("✓ Database opened successfully with default configuration\n")
+
+	return db, nil, nil
 }
 
 // getTableCategories returns predefined table categories for analysis
@@ -839,6 +955,66 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 		// Note: Block data tables (BlockBody, Receipt, Header, TransactionLog, etc.) will be handled by batch-based pruning
 		// This allows keeping recent data while removing old data, perfect for sequencer nodes
 
+	case PruneLevelAggressive:
+		// Aggressive: all moderate deletions + state data cleanup
+
+		// Include all moderate mode deletions first
+		deleteCategories := []string{"History Data Tables", "Index Tables", "Trie Tables", "Beacon Tables"}
+		for _, category := range deleteCategories {
+			if tables, exists := categories[category]; exists {
+				for _, table := range tables {
+					if !critical[table] {
+						for _, existingTable := range allTables {
+							if existingTable == table {
+								toDelete = append(toDelete, table)
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Include moderate mode's transaction optimization tables
+		transactionOptimizationDeletes := []string{
+			"BlockTransaction",         // Complete transaction RLP data (redundant with BlockBody)
+			"BlockTransactionLookup",   // Hash-to-block lookup index (not essential for sequence nodes)
+			"hermez_txPricePercentage", // Transaction pricing data (for RPC queries only, not core functionality)
+		}
+
+		// Add transaction optimization tables to delete list
+		for _, table := range transactionOptimizationDeletes {
+			if !critical[table] {
+				for _, existingTable := range allTables {
+					if existingTable == table {
+						toDelete = append(toDelete, table)
+						break
+					}
+				}
+			}
+		}
+
+		// Add diagnostic tables
+		diagnosticDeletes := []string{
+			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
+			"just_unwound", "PoolLimbo",
+		}
+
+		for _, table := range diagnosticDeletes {
+			if !critical[table] {
+				for _, existingTable := range allTables {
+					if existingTable == table {
+						toDelete = append(toDelete, table)
+						break
+					}
+				}
+			}
+		}
+
+		// Aggressive mode specific: add state-related tables for partial cleanup
+		// AccountChangeSet and StorageChangeSet will be handled specially in batch-based pruning
+		// to preserve recent data while removing historical data
+
 	}
 
 	return toDelete
@@ -858,6 +1034,8 @@ func getPruneLevelName(level PruneLevel) string {
 		return "Conservative"
 	case PruneLevelModerate:
 		return "Moderate"
+	case PruneLevelAggressive:
+		return "Aggressive"
 	default:
 		return "Conservative"
 	}
@@ -870,11 +1048,12 @@ func main() {
 	args := os.Args[1:]
 	if len(args) < 1 {
 		log.Error("Usage: prune-chaindata <db_path> [level] [options]")
-		log.Error("Levels: conservative (default), moderate")
+		log.Error("Levels: conservative (default), moderate, aggressive")
 		log.Error("Options:")
 		log.Error("  --keep-recent-batches N    Keep recent N batches (default: 10)")
 		log.Error("  --yes, -y                  Skip confirmation prompts")
 		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
+		log.Error("AGGRESSIVE mode: Also cleans historical AccountChangeSet & StorageChangeSet")
 		os.Exit(1)
 	}
 
@@ -892,6 +1071,8 @@ func main() {
 			pruneLevel = PruneLevelConservative
 		case arg == "moderate":
 			pruneLevel = PruneLevelModerate
+		case arg == "aggressive":
+			pruneLevel = PruneLevelAggressive
 
 		case strings.HasPrefix(arg, "--keep-recent-batches"):
 			if strings.Contains(arg, "=") {
@@ -931,8 +1112,10 @@ func main() {
 					pruneLevel = PruneLevelConservative
 				case "moderate":
 					pruneLevel = PruneLevelModerate
+				case "aggressive":
+					pruneLevel = PruneLevelAggressive
 				default:
-					log.Error("Invalid level. Use: conservative or moderate")
+					log.Error("Invalid level. Use: conservative, moderate, or aggressive")
 					os.Exit(1)
 				}
 			}
@@ -946,7 +1129,7 @@ func main() {
 	fmt.Printf("Chaindata path: %s\n", dbMainDBPath)
 	fmt.Printf("SMT path: %s\n", dbSMTDBPath)
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
-	if pruneLevel == PruneLevelModerate {
+	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
 		fmt.Printf("Keep recent batches: %d\n", keepRecentBatches)
 	}
 
@@ -967,15 +1150,14 @@ func main() {
 	}
 
 	// Open chaindata database
-	chaindb, chainInfo, err := openDatabase(dbMainDBPath, kv.ChainDB, log)
+	chaindb, _, err := openDatabase(dbMainDBPath, kv.ChainDB, log)
 	if err != nil {
 		log.Error("Failed to open chaindata db", "error", err)
 		os.Exit(1)
 	}
 	defer chaindb.Close()
 
-	newMapSize := datasize.ByteSize(chainInfo.MapSize)
-	log.Info("Chaindata database info", "pageSize", chainInfo.PageSize, "mapSize", newMapSize.HumanReadable())
+	log.Info("Chaindata database opened successfully")
 
 	// Get chaindata table list
 	allTables, err := getTableList(chaindb)
@@ -1019,7 +1201,7 @@ func main() {
 
 	fmt.Printf("\nTables to be deleted:\n")
 	for i, table := range toDelete {
-		entries, sizeBytes, pages, err := getTableStats(chaindb, table, uint64(chainInfo.PageSize))
+		entries, sizeBytes, pages, err := getTableStats(chaindb, table)
 		if err != nil {
 			fmt.Printf("%3d. %-30s (failed to get stats)\n", i+1, table)
 		} else {
@@ -1031,7 +1213,7 @@ func main() {
 
 	// Calculate total database size
 	for _, table := range allTables {
-		_, sizeBytes, _, err := getTableStats(chaindb, table, uint64(chainInfo.PageSize))
+		_, sizeBytes, _, err := getTableStats(chaindb, table)
 		if err == nil {
 			totalDbSize += sizeBytes
 		}
@@ -1056,6 +1238,15 @@ func main() {
 			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"))
 		fmt.Printf("🎯 zkEVM optimized: Complete cleanup for sequence nodes (deletes BlockTransaction + lookup + pricing tables)\n")
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
+
+	case PruneLevelAggressive:
+		fmt.Printf("Aggressive pruning: Maximum cleanup including historical state data\n")
+		fmt.Printf("Strategy: All moderate mode deletions + historical AccountChangeSet & StorageChangeSet cleanup\n")
+		fmt.Printf("Preserves: Recent %d batches of state history, current PlainState, SMT data, core operational tables\n", keepRecentBatches)
+		fmt.Printf("Deletes: Same as moderate + historical state change data beyond recent batches\n")
+		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical state queries not needed\n")
+		fmt.Printf("🚀 Maximum space savings: Optimized for nodes with complete SMT and limited historical query needs\n")
+		fmt.Printf("Best for: Advanced production setups, maximum storage optimization\n")
 
 	}
 
@@ -1085,9 +1276,9 @@ func main() {
 	}
 	defer tx.Rollback()
 
-	// Perform batch-based pruning for moderate level
+	// Perform batch-based pruning for moderate and aggressive levels
 	var deletedBatches, deletedBlocks int
-	if pruneLevel == PruneLevelModerate {
+	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
 		fmt.Printf("\n=== Executing Batch-based Pruning Strategy ===\n")
 		deletedBatches, deletedBlocks, err = partialPruneBatchTables(tx, keepRecentBatches)
 		if err != nil {
@@ -1095,6 +1286,17 @@ func main() {
 			// Continue with regular deletion instead of exiting
 		} else {
 			fmt.Printf("✓ Batch-based pruning completed successfully!\n")
+		}
+
+		// Additional aggressive mode: clean historical state data
+		if pruneLevel == PruneLevelAggressive {
+			fmt.Printf("\n=== Executing Aggressive State Data Cleanup ===\n")
+			deletedStateRecords, err := pruneHistoricalStateData(tx, keepRecentBatches)
+			if err != nil {
+				log.Error("Failed to perform state data cleanup", "error", err)
+			} else {
+				fmt.Printf("✓ Historical state data cleanup completed: %d records deleted\n", deletedStateRecords)
+			}
 		}
 	}
 
@@ -1114,13 +1316,13 @@ func main() {
 
 	for _, table := range toDelete {
 		// Skip block tables if we did partial pruning
-		if pruneLevel == PruneLevelModerate && partiallyPrunedTables[table] {
+		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
 			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
 			continue
 		}
 
 		// Get table size before deletion
-		entries, sizeBytes, _, err := getTableStats(chaindb, table, uint64(chainInfo.PageSize))
+		entries, sizeBytes, _, err := getTableStats(chaindb, table)
 		if err == nil && entries > 0 {
 			actualDeletedSize += sizeBytes
 			actuallyDeletedTables++
@@ -1149,11 +1351,11 @@ func main() {
 
 	// Calculate space savings
 	var batchDeletedSize uint64
-	if pruneLevel == PruneLevelModerate && deletedBatches > 0 {
+	if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && deletedBatches > 0 {
 		// Estimate batch deletion size (approximate)
 		for _, table := range []string{"BlockBody", "Receipt", "TxSender", "TransactionLog"} {
 			if partiallyPrunedTables[table] {
-				entries, sizeBytes, _, err := getTableStats(chaindb, table, uint64(chainInfo.PageSize))
+				entries, sizeBytes, _, err := getTableStats(chaindb, table)
 				if err == nil && entries > 0 {
 					// Estimate: (deleted_batches / total_batches) * current_size
 					estimatedOriginalSize := sizeBytes * uint64(deletedBatches+5) / 5 // Rough estimate
@@ -1168,7 +1370,7 @@ func main() {
 
 	fmt.Printf("\n=== Pruning Completed ===\n")
 	fmt.Printf("Tables with actual data deleted: %d (out of %d total cleared)\n", actuallyDeletedTables, deletedCount)
-	if pruneLevel == PruneLevelModerate && deletedBatches > 0 {
+	if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && deletedBatches > 0 {
 		fmt.Printf("Batch-level data deleted: %d batches (%d blocks)\n", deletedBatches, deletedBlocks)
 	}
 	fmt.Printf("Total space freed: %s (%.2f%% of database)\n",

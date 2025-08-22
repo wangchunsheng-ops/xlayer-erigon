@@ -7,9 +7,8 @@ import (
 	"sort"
 
 	"github.com/c2h5oh/datasize"
-	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
+	mdbx "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	mdbxpkg "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon/smt/pkg/db"
 
@@ -31,8 +30,8 @@ func checkSMTDatabase(smtPath string) bool {
 	return true
 }
 
-// openDatabase opens database at specified path and returns related info
-func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *mdbx2.EnvInfo, error) {
+// openDatabase opens database at specified path using the safest possible approach
+func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, error) {
 	ctx := context.Background()
 
 	var opts mdbx.MdbxOpts
@@ -44,38 +43,16 @@ func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *md
 		opts = mdbx.NewMDBX(log).Path(dbPath).Label(label)
 	}
 
-	// Get database info
-	env, err := mdbx2.NewEnv()
+	// Use the simplest possible approach: let MDBX use its default configuration
+	// This avoids all geometry mismatch issues
+	db, err := opts.Open(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to create env: %w", err)
+		return nil, fmt.Errorf("Failed to open database: %w", err)
 	}
 
-	err = env.Open(dbPath, opts.GetFlags(), 0664)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to open env: %w", err)
-	}
+	fmt.Printf("✓ Database opened successfully with default configuration\n")
 
-	in, err := env.Info(nil)
-	if err != nil {
-		env.Close()
-		return nil, nil, fmt.Errorf("Failed to get env info: %w", err)
-	}
-	env.Close()
-
-	newMapSize := datasize.ByteSize(in.MapSize)
-
-	// Open database with conservative flags to match sequencer
-	db, err := opts.Flags(func(flags uint) uint {
-		// Use conservative flags that match sequencer defaults
-		// Remove problematic flags and use standard configuration
-		return uint(mdbx2.NoReadahead | mdbx2.Coalesce | mdbx2.Durable)
-	}).PageSize(uint64(in.PageSize)).MapSize(newMapSize).Open(ctx)
-
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to open database: %w", err)
-	}
-
-	return db, in, nil
+	return db, nil
 }
 
 // getTableList gets list of tables in database
@@ -96,8 +73,8 @@ func getTableList(db kv.RwDB) ([]string, error) {
 	return tables, nil
 }
 
-// getTableStats gets statistics info of table
-func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint64, uint64, error) {
+// getTableStats gets statistics info of table (using default pageSize)
+func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error) {
 	ctx := context.Background()
 	tx, err := db.BeginRo(ctx)
 	if err != nil {
@@ -112,7 +89,9 @@ func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint6
 		}
 
 		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
-		sizeBytes := totalPages * pageSize
+		// Use default MDBX page size of 8192 bytes
+		const defaultPageSize = 8192
+		sizeBytes := totalPages * defaultPageSize
 
 		return stat.Entries, sizeBytes, totalPages, nil
 	}
@@ -154,15 +133,14 @@ func main() {
 	}
 
 	// Open chaindata database
-	chaindb, chainInfo, err := openDatabase(dbMainDBPath, kv.ChainDB, log)
+	chaindb, err := openDatabase(dbMainDBPath, kv.ChainDB, log)
 	if err != nil {
 		log.Error("Failed to open chaindata db", "error", err)
 		os.Exit(1)
 	}
 	defer chaindb.Close()
 
-	newMapSize := datasize.ByteSize(chainInfo.MapSize)
-	log.Info("Chaindata database info", "pageSize", chainInfo.PageSize, "mapSize", newMapSize.HumanReadable())
+	log.Info("Chaindata database opened successfully")
 
 	// Get chaindata table list
 	chainTables, err := getTableList(chaindb)
@@ -179,18 +157,16 @@ func main() {
 
 	// Handle SMT database (if exists)
 	var smtTables []string
-	var smtInfo *mdbx2.EnvInfo
 	var smtdb kv.RwDB
 
 	if smtSeparated {
-		smtdb, smtInfo, err = openDatabase(dbSMTDBPath, kv.ChainDB, log) // SMT also uses ChainDB label
+		smtdb, err = openDatabase(dbSMTDBPath, kv.ChainDB, log) // SMT also uses ChainDB label
 		if err != nil {
 			log.Error("Failed to open SMT database", "error", err)
 		} else {
 			defer smtdb.Close()
 
-			smtMapSize := datasize.ByteSize(smtInfo.MapSize)
-			log.Info("SMT database info", "pageSize", smtInfo.PageSize, "mapSize", smtMapSize.HumanReadable())
+			log.Info("SMT database opened successfully")
 
 			smtTables, err = getTableList(smtdb)
 			if err != nil {
@@ -357,7 +333,7 @@ func main() {
 	// Chaindata table statistics
 	fmt.Printf("\nChaindata Database:\n")
 	for _, tableName := range chainTables {
-		entries, sizeBytes, pages, err := getTableStats(chaindb, tableName, uint64(chainInfo.PageSize))
+		entries, sizeBytes, pages, err := getTableStats(chaindb, tableName)
 		if err != nil {
 			fmt.Printf("  %-30s: Failed to get stats: %v\n", tableName, err)
 			continue
@@ -371,7 +347,7 @@ func main() {
 	if smtSeparated && smtdb != nil {
 		fmt.Printf("\nSMT Database:\n")
 		for _, tableName := range smtTables {
-			entries, sizeBytes, pages, err := getTableStats(smtdb, tableName, uint64(smtInfo.PageSize))
+			entries, sizeBytes, pages, err := getTableStats(smtdb, tableName)
 			if err != nil {
 				fmt.Printf("  %-30s: Failed to get stats: %v\n", tableName, err)
 				continue
