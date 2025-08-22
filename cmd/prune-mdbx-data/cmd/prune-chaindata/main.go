@@ -174,6 +174,8 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 		// State and SMT tables with block_number keys
 		"plain_state_version", // block number -> state version
 		"smt_depths",          // block number -> smt depth
+		// Transaction metadata tables with block_number keys
+		"MaxTxNum", // block number -> max tx num in block
 	}
 	for _, table := range simpleTables {
 		err := tx.Delete(table, blockKey)
@@ -210,6 +212,12 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 	err = deleteTransactionLogs(tx, blockNo)
 	if err != nil {
 		return fmt.Errorf("failed to delete transaction logs for block %d: %w", blockNo, err)
+	}
+
+	// Special handling for composite key tables (block_number + hash)
+	err = deleteCompositeKeyData(tx, blockNo)
+	if err != nil {
+		return fmt.Errorf("failed to delete composite key data for block %d: %w", blockNo, err)
 	}
 
 	return nil
@@ -385,6 +393,63 @@ func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
 	// Delete all found keys
 	for _, key := range keysToDelete {
 		err := tx.Delete("TransactionLog", key)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteCompositeKeyData deletes data from tables with composite keys (block_number + hash)
+func deleteCompositeKeyData(tx kv.RwTx, blockNo uint64) error {
+	// Tables with composite key format: block_number_u64 + hash
+	compositeKeyTables := []string{
+		"Header",                 // block_num_u64 + hash -> header (RLP)
+		"HeadersTotalDifficulty", // block_num_u64 + hash -> td (RLP)
+		"BlockBody",              // block_num_u64 + hash -> block body
+		"TxSender",               // block_num_u64 + blockHash -> sendersList
+	}
+
+	blockPrefix := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockPrefix, blockNo)
+
+	for _, tableName := range compositeKeyTables {
+		err := deleteTableWithBlockPrefix(tx, tableName, blockPrefix)
+		if err != nil {
+			// Log warning but continue - some tables might not exist or have no data for this block
+			continue
+		}
+	}
+
+	return nil
+}
+
+// deleteTableWithBlockPrefix deletes all entries from a table that start with given block prefix
+func deleteTableWithBlockPrefix(tx kv.RwTx, tableName string, blockPrefix []byte) error {
+	cursor, err := tx.RwCursor(tableName)
+	if err != nil {
+		return err // Table might not exist
+	}
+	defer cursor.Close()
+
+	var keysToDelete [][]byte
+	for key, _, err := cursor.Seek(blockPrefix); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+
+		// Check if key starts with our block prefix
+		if len(key) < len(blockPrefix) || !bytes.HasPrefix(key, blockPrefix) {
+			break // No more entries for this block
+		}
+
+		keysToDelete = append(keysToDelete, common.Copy(key))
+	}
+
+	// Delete all found keys
+	for _, key := range keysToDelete {
+		err := cursor.Delete(key)
 		if err != nil {
 			return err
 		}
