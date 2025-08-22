@@ -1210,33 +1210,19 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			dataStreamServer = dataStreamServerFactory.CreateDataStreamServer(backend.streamServer, backend.chainConfig.ChainID.Uint64())
 		}
 
-		// Create L1 syncers based on node type
-		l1BlockSyncer := syncer.NewL1Syncer(
-			ctx,
-			ethermanClients,
-			[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
-			[][]libcommon.Hash{{
-				contracts.SequenceBatchesTopic,
-			}},
-			cfg.L1BlockRange,
-			cfg.L1QueryDelay,
-			cfg.L1HighestBlockType,
-			cfg.Zk.XLayer.GetLogsTimeout,
-			cfg.Zk.XLayer.GetLogsRetries,
-		)
+		if isSequencer {
+			// if we are sequencing transactions, we do the sequencing loop...
 
-		var sequencerL1Syncer *syncer.L1Syncer
-		if !isSequencer {
-			sequencerL1Syncer = syncer.NewL1Syncer(
+			// we need to make sure the pool is always aware of the latest block for when
+			// we switch context from being an RPC node to a sequencer
+			backend.txPool2.ForceUpdateLatestBlock(executionProgress)
+
+			l1BlockSyncer := syncer.NewL1Syncer(
 				ctx,
 				ethermanClients,
 				[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
 				[][]libcommon.Hash{{
-					contracts.InitialSequenceBatchesTopic,
-					contracts.AddNewRollupTypeTopic,
-					contracts.AddNewRollupTypeTopicBanana,
-					contracts.CreateNewRollupTopic,
-					contracts.UpdateRollupTopic,
+					contracts.SequenceBatchesTopic,
 				}},
 				cfg.L1BlockRange,
 				cfg.L1QueryDelay,
@@ -1244,16 +1230,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				cfg.Zk.XLayer.GetLogsTimeout,
 				cfg.Zk.XLayer.GetLogsRetries,
 			)
-
-			log.Info("RPC node: Created dedicated Sequencer L1 syncer for event pre-synchronization")
-		}
-
-		if isSequencer {
-			// if we are sequencing transactions, we do the sequencing loop...
-
-			// we need to make sure the pool is always aware of the latest block for when
-			// we switch context from being an RPC node to a sequencer
-			backend.txPool2.ForceUpdateLatestBlock(executionProgress)
 
 			// For X Layer, apollo
 			backend.l1BlockSyncer = l1BlockSyncer
@@ -1350,6 +1326,40 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				}
 			}
 
+			l1BlockSyncer := syncer.NewL1Syncer(
+				ctx,
+				ethermanClients,
+				[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+				[][]libcommon.Hash{{
+					contracts.SequenceBatchesTopic,
+				}},
+				cfg.L1BlockRange,
+				cfg.L1QueryDelay,
+				cfg.L1HighestBlockType,
+				cfg.Zk.XLayer.GetLogsTimeout,
+				cfg.Zk.XLayer.GetLogsRetries,
+			)
+
+			sequencerL1Syncer := syncer.NewL1Syncer(
+				ctx,
+				ethermanClients,
+				[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+				[][]libcommon.Hash{{
+					contracts.InitialSequenceBatchesTopic,
+					contracts.AddNewRollupTypeTopic,
+					contracts.AddNewRollupTypeTopicBanana,
+					contracts.CreateNewRollupTopic,
+					contracts.UpdateRollupTopic,
+				}},
+				cfg.L1BlockRange,
+				cfg.L1QueryDelay,
+				cfg.L1HighestBlockType,
+				cfg.Zk.XLayer.GetLogsTimeout,
+				cfg.Zk.XLayer.GetLogsRetries,
+			)
+
+			log.Info("RPC node: Created dedicated Sequencer L1 syncer for event pre-synchronization")
+
 			backend.syncStages = stages2.NewDefaultZkStages(
 				backend.sentryCtx,
 				backend.chainDB,
@@ -1363,7 +1373,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.forkValidator,
 				backend.engine,
 				backend.l1Syncer,
-				l1BlockSyncer,     // Added: L1 block syncer
+				l1BlockSyncer,     // Added: RPC node specific Sequencer L1 syncer
 				sequencerL1Syncer, // Added: RPC node specific Sequencer L1 syncer
 				streamClient,
 				dataStreamServer,
