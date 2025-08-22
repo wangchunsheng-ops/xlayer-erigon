@@ -725,8 +725,24 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 			}
 		}
 
-		// Additional deletes for Moderate mode - to be added carefully after analysis
-		// TODO: Add tables one by one after analyzing their purpose and size
+		// Additional deletes for Moderate mode - transaction lookup optimization tables
+		// For sequence nodes: these tables provide query optimization but BlockBody already contains transactions
+		transactionOptimizationDeletes := []string{
+			"BlockTransaction",       // Complete transaction RLP data (redundant with BlockBody)
+			"BlockTransactionLookup", // Hash-to-block lookup index (not essential for sequence nodes)
+		}
+
+		// Add transaction optimization tables to delete list
+		for _, table := range transactionOptimizationDeletes {
+			if !critical[table] {
+				for _, existingTable := range allTables {
+					if existingTable == table {
+						toDelete = append(toDelete, table)
+						break
+					}
+				}
+			}
+		}
 
 		// Start with diagnostic tables that are obviously safe
 		diagnosticDeletes := []string{
@@ -960,10 +976,10 @@ func main() {
 		fmt.Printf("Moderate pruning: Comprehensive cleanup with batch-based optimization\n")
 		fmt.Printf("Strategy: Delete unnecessary tables + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
 		fmt.Printf("Preserves: Recent batch data, core state data, zkEVM operational tables\n")
-		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Diagnostic (%d), + old batch data\n",
+		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Transaction optimization (2), Diagnostic (5), + old batch data\n",
 			getTableCategoryCount("History Data Tables"), getTableCategoryCount("Index Tables"),
-			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"), 5)
-		fmt.Printf("🎯 zkEVM optimized: Balance between space saving and operational capability\n")
+			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"))
+		fmt.Printf("🎯 zkEVM optimized: Complete cleanup for sequence nodes (deletes BlockTransaction + lookup tables)\n")
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	}
