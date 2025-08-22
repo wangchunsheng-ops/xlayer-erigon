@@ -709,8 +709,250 @@ To revert this fix (NOT RECOMMENDED):
 
 ---
 
-*Last Updated: 2024-08-21*  
-*Next Change ID: #008*
+## Change Record #008
+
+**Date**: 2024-12-XX  
+**Issue**: Architecture redesign - migrate from block-based to batch-based pruning for X Layer zkEVM  
+**Problem Description**: 
+- Previous block-based retention (keeping N blocks) doesn't align with X Layer's zkEVM architecture
+- Batch is the fundamental unit in Layer 2 zkEVM - each batch contains multiple blocks
+- ZK proofs are generated per batch, not per block
+- State commits happen at batch level, not block level
+- Current design is semantically inconsistent with zkEVM principles
+
+**Solution**: Complete redesign from block-based to batch-based pruning strategy  
+**Modification Type**: Major architecture change, design philosophy shift
+
+### 🏗️ Architecture Changes
+
+#### Before (Block-based Strategy)
+```go
+type BatchBasedPruneConfig struct {
+    KeepRecentBatches uint64 // Complex config structure
+    MinKeepBlocks     uint64 // Safety parameters  
+    SafetyMargin      uint64 // Over-engineered
+}
+
+// Complex function signatures
+func partialPruneBlockTables(tx kv.RwTx, config BatchBasedPruneConfig) error
+```
+
+#### After (Simplified Batch-based Strategy)  
+```go
+// No config structure - direct parameter passing
+func partialPruneBatchTables(tx kv.RwTx, keepRecentBatches uint64) error
+```
+
+### 🎯 Key Design Changes
+
+#### 1. Simplified Configuration
+- **Removed**: `BatchBasedPruneConfig` struct (over-engineered)
+- **Replaced**: Direct parameter passing with `keepRecentBatches uint64`
+- **Default**: Keep recent 10 batches (vs previous 100 blocks)
+
+#### 2. Batch-aware Logic
+- **New Core Function**: `partialPruneBatchTables()` - processes by batch units
+- **Batch Discovery**: Uses `GetL2BlockNosByBatch()` to find blocks in each batch
+- **Semantic Consistency**: Deletes complete batches, not arbitrary block ranges
+- **ZK-friendly**: Preserves complete batch data for proof generation
+
+#### 3. User Experience Improvements
+- **Added**: `--yes` / `-y` flag for non-interactive operation
+- **Simplified**: Command line interface with fewer parameters
+- **Removed**: Aggressive pruning level (unnecessary complexity)
+
+### 🔧 Implementation Details
+
+#### New Batch Processing Logic
+```go
+// 1. Get latest batch number from hermez database
+latestBatch, err := getLatestBatchNumber(tx)
+
+// 2. Calculate batch pruning boundary  
+pruneBefore = latestBatch - keepRecentBatches + 1
+
+// 3. For each batch to delete:
+for batchNo := uint64(0); batchNo < pruneBefore; batchNo++ {
+    // Get all blocks in this batch
+    blockNos, err := hermezDb.GetL2BlockNosByBatch(batchNo)
+    
+    // Delete all block data in this batch
+    for _, blockNo := range blockNos {
+        deleteBlockData(tx, blockNo)
+    }
+    
+    // Delete batch metadata
+    deleteBatchMetadata(tx, batchNo)
+}
+```
+
+#### Enhanced Database Access
+- **New Function**: `getLatestBatchNumber()` - reads from `BLOCKBATCHES` table
+- **Batch Tables**: Properly handles hermez-specific tables (BATCH_BLOCKS, FORKIDS, etc.)
+- **Block Mapping**: Uses `GetL2BlockNosByBatch()` for accurate batch-to-block mapping
+
+### 📋 Command Line Changes
+
+#### Before
+```bash
+./prune-chaindata /path/to/db moderate --keep-recent-blocks=100
+# Also supported: --min-keep-blocks, --safety-margin
+# Also supported: aggressive level
+```
+
+#### After  
+```bash
+./prune-chaindata /path/to/db moderate --keep-recent-batches=10 --yes
+# Simplified: only two levels (conservative, moderate)
+# Added: --yes flag for automation
+```
+
+### 🗂️ Supported Pruning Levels
+
+#### Conservative (Unchanged)
+- Preserves: All block data, transaction data, state data
+- Deletes: History data, indexes, Trie, Beacon tables
+- Use case: Development, debugging, full compatibility
+
+#### Moderate (Enhanced with Batch Strategy)
+- Preserves: Recent batch data (default 10 batches), core state, ZKEVM data
+- Deletes: Old batch data, history data, indexes, some state tables  
+- Use case: Production sequencer nodes
+- **NEW**: Uses batch-based pruning strategy
+
+#### ~~Aggressive~~ (Removed)
+- Reason: Unnecessary complexity, moderate level sufficient for most use cases
+
+### 🔍 File Structure Changes
+
+#### Modified Files
+- ✅ **main.go**: Complete logic rewrite for batch-based processing
+- ✅ **Usage help**: Updated to reflect new parameters
+- ✅ **getCriticalTables()**: Enhanced protection for hermez tables
+
+#### New Dependencies
+- ✅ **hermez_db import**: Added for batch-block mapping access
+- ✅ **Batch metadata handling**: Support for hermez-specific table deletion
+
+### 🧪 Verification Methods
+
+#### Batch Consistency Check
+```bash
+# Verify batch integrity after pruning
+cast rpc zkevm_batchNumber --rpc-url http://localhost:8545
+
+# Check recent batch data availability  
+cast rpc zkevm_getBatchByNumber latest --rpc-url http://localhost:8545
+```
+
+#### Database Verification
+```sql
+-- Check remaining batches
+SELECT COUNT(*) FROM hermez_blockBatches;
+
+-- Verify batch-block mapping consistency
+SELECT batch_no, COUNT(block_no) as blocks_per_batch 
+FROM hermez_blockBatches 
+GROUP BY batch_no 
+ORDER BY batch_no DESC 
+LIMIT 10;
+```
+
+### 💡 Benefits of Batch-based Strategy
+
+#### 1. **Semantic Consistency**
+- ✅ Aligns with zkEVM architecture where batch is the fundamental unit
+- ✅ Preserves complete batch data for ZK proof generation
+- ✅ Maintains state consistency at batch boundaries
+
+#### 2. **Operational Safety**  
+- ✅ No partial batch corruption (all blocks in a batch kept together)
+- ✅ ZK verification still possible for retained batches
+- ✅ State rollback capabilities preserved at batch level
+
+#### 3. **Storage Efficiency**
+- ✅ Larger pruning granularity (batch vs block) = better space reclaim
+- ✅ Typically 10 batches ≈ 100-200 blocks (adaptive to batch size)
+- ✅ More predictable storage reduction
+
+#### 4. **User Experience**
+- ✅ Simplified configuration (1 parameter vs 3)
+- ✅ Non-interactive mode with `--yes` flag
+- ✅ Clearer parameter naming (`--keep-recent-batches`)
+
+### 🔄 Migration Guide
+
+#### For Existing Users
+```bash
+# Old command:
+./prune-chaindata /path/to/db moderate --keep-recent-blocks=100
+
+# New equivalent:
+./prune-chaindata /path/to/db moderate --keep-recent-batches=10
+# Note: 10 batches typically contains 100-200 blocks depending on batch size
+```
+
+#### For Automation Scripts
+```bash
+# Add --yes flag for non-interactive operation
+./prune-chaindata /path/to/db moderate --keep-recent-batches=15 --yes
+```
+
+### 🔧 Rollback Instructions
+
+To revert to block-based strategy:
+
+1. **Restore BatchBasedPruneConfig structure**:
+```go
+type BatchBasedPruneConfig struct {
+    KeepRecentBatches uint64
+    MinKeepBlocks     uint64 
+    SafetyMargin      uint64
+}
+```
+
+2. **Restore old function signatures**:
+```go
+func partialPruneBlockTables(tx kv.RwTx, keepRecentBlocks uint64) error
+```
+
+3. **Remove hermez_db integration**:
+```go
+// Remove: hermez_db import and batch-specific logic
+// Restore: block-based iteration and deletion
+```
+
+4. **Restore aggressive level**:
+```go
+const (
+    PruneLevelConservative PruneLevel = iota
+    PruneLevelModerate                      
+    PruneLevelAggressive  // <-- Add back
+)
+```
+
+⚠️ **Warning**: Rollback loses the semantic benefits of batch-aware pruning for zkEVM architecture!
+
+### 🎯 Resolution Status
+- ✅ **Architecture Redesigned** - From block-based to batch-based strategy
+- ✅ **Implementation Complete** - All batch processing logic implemented  
+- ✅ **User Experience Enhanced** - Simplified configuration + --yes flag
+- ✅ **zkEVM Compatibility** - Semantically consistent with L2 architecture
+- ✅ **Documentation Updated** - Usage instructions and parameter changes
+
+**Priority**: 🔵 **MAJOR** - Architectural improvement for zkEVM semantic consistency  
+**Status**: **COMPLETED** - Batch-based pruning strategy fully implemented
+
+### 📝 Technical Notes
+1. **Batch Size Variability**: Batches can contain different numbers of blocks
+2. **Hermez Integration**: Leverages existing hermez_db functions for reliability
+3. **Backward Compatibility**: Command structure similar, only parameter names changed
+4. **Future-Proof**: Easier to extend for other batch-level operations
+
+---
+
+*Last Updated: 2024-12-XX*  
+*Next Change ID: #009*
 
 ---
 

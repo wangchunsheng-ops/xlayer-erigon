@@ -39,7 +39,7 @@ This tool helps you:
 
 #### Pruning Levels
 
-The tool provides three pruning levels:
+The tool provides two pruning levels:
 
 1. **Conservative Pruning (conservative)** - Default level
    - Delete obviously unnecessary tables: history data, indexes, Trie, Beacon tables
@@ -48,74 +48,65 @@ The tool provides three pruning levels:
    - **Deletes ~50 tables**, saves ~15-20% space
 
 2. **Moderate Pruning (moderate)** - Recommended level ⭐
-   - **Smart partial deletion**: Preserves recent block data, deletes historical data
-   - Preserve: Core state data, sync progress, ZKEVM data, **recent 100 blocks** (7 tables)
-   - Delete: History data, indexes, some state tables, old block data
-   - **Uses partial pruning**: Keeps recent blocks to ensure node can restart
-   - **Partial pruning**: Header, BlockBody, Receipt, TxSender, CanonicalHeader, TransactionLog, HeaderNumber
-   - **Full deletion**: BlockTransaction, BlockTransactionLookup (excluded due to key format complexity)
+   - **🆕 NEW: Batch-based pruning strategy** for X Layer zkEVM architecture
+   - **Smart batch deletion**: Preserves recent batch data, deletes historical batches
+   - Preserve: Core state data, sync progress, ZKEVM data, **recent 10 batches** (all blocks in those batches)
+   - Delete: History data, indexes, some state tables, old batch data
+   - **Batch-aware**: Keeps complete batches to maintain ZK proof generation capability
+   - **Semantic consistency**: Aligns with X Layer's batch-based architecture where batch is the fundamental unit
    - Balanced safety and space saving, suitable for sequencer operation
    - **Deletes ~97 tables**, saves ~37% space
 
-3. **Aggressive Pruning (aggressive)**
-   - Delete almost all tables, keep only operational necessities
-   - Preserve: PlainState (current state), sync progress, critical ZKEVM data, **recent 100 blocks** (7 tables)
-   - Delete: Most block data, transaction data, state data (except recent blocks)
-   - **Uses partial pruning**: Same 7 block tables as Moderate level preserve recent data
-   - **Full deletion**: BlockTransaction, BlockTransactionLookup still fully deleted
-   - Maximum space saving while maintaining node restart capability
-   - ⚠️ **SAFER THAN BEFORE**: Recent block data preserved to allow node restart
-   - **Deletes ~150+ tables**, saves ~50-60% space
+## 🔧 Batch-based Pruning Feature
 
-## 🔧 Partial Pruning Feature
-
-**NEW**: Smart partial deletion for block tables to prevent node startup failures.
+**🆕 NEW**: Smart batch-based deletion strategy for X Layer zkEVM architecture.
 
 ### How It Works
 
-Instead of completely deleting block tables (which would prevent node restart), the tools now use **partial pruning**:
+Instead of arbitrary block-based deletion, the tool now uses **batch-aware pruning** that aligns with X Layer's zkEVM architecture:
 
-1. **Analyze**: Detects the latest block number in the database
-2. **Calculate**: Determines the cutoff point (latest block - keep count)
-3. **Preserve**: Keeps recent N blocks of data in block tables
-4. **Remove**: Deletes only historical block data older than the cutoff
+1. **Batch Discovery**: Gets the latest batch number from hermez database
+2. **Batch Calculation**: Determines batch pruning boundary (latest batch - keep count)
+3. **Batch Processing**: For each batch to delete:
+   - Finds all blocks contained in that batch
+   - Deletes all block data for those blocks
+   - Deletes batch-specific metadata
+4. **Complete Batches**: Preserves complete batch data to maintain ZK proof generation capability
 
-### Affected Tables
+### Batch Processing Logic
 
-The following **7 tables** use partial pruning in **Moderate** and **Aggressive** levels:
+| Step | Action | Details |
+|------|--------|---------|
+| 1 | **Batch Enumeration** | Uses `GetL2BlockNosByBatch()` to find blocks in each batch |
+| 2 | **Block Data Deletion** | Deletes: Header, BlockBody, Receipt, TxSender, CanonicalHeader, TransactionLog |
+| 3 | **Batch Metadata Deletion** | Deletes: BATCH_BLOCKS, FORKIDS, STATE_ROOTS, etc. |
+| 4 | **Preservation** | Keeps complete recent batches for operational consistency |
 
-| Table Name | Key Format | Description | Default Retention |
-|------------|------------|-------------|-------------------|
-| `Header` | block_num + hash | Block headers data | **Recent 100 blocks** |
-| `BlockBody` | block_num + hash | Block body content | **Recent 100 blocks** |
-| `Receipt` | block_num | Transaction receipts | **Recent 100 blocks** |
-| `TxSender` | block_num + blockHash | Transaction sender addresses | **Recent 100 blocks** |
-| `CanonicalHeader` | block_num | Canonical block headers | **Recent 100 blocks** |
-| `TransactionLog` | block_num + txId | Transaction logs/events | **Recent 100 blocks** |
-| `HeaderNumber` | header_hash → block_num | Block number mappings | **Recent 100 blocks** |
+### Benefits of Batch-based Strategy
 
-### ❌ Excluded Tables (Full Deletion Still Applied)
-
-| Table Name | Key Format | Reason for Exclusion |
-|------------|------------|----------------------|
-| `BlockTransaction` | tx_id | Uses transaction ID sequence, not block number |
-| `BlockTransactionLookup` | tx_hash | Uses transaction hash, not block number |
-
-🔄 **Behavior**: Partial pruning preserves the **most recent 100 blocks** of data (configurable via `--keep-recent-blocks`) and deletes older historical entries. Excluded tables still undergo complete deletion in their respective pruning levels.
+| Benefit | Description |
+|---------|-------------|
+| **🔗 Semantic Consistency** | Aligns with zkEVM where batch is the fundamental unit |
+| **🛡️ ZK-friendly** | Preserves complete batch data for proof generation |
+| **🎯 Operational Safety** | No partial batch corruption, maintains state consistency |
+| **💾 Storage Efficiency** | Larger pruning granularity = better space reclaim |
 
 ### Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--keep-recent-blocks` | 100 | Number of recent blocks to preserve |
+| `--keep-recent-batches` | 10 | Number of recent batches to preserve |
+| `--yes, -y` | false | Skip confirmation prompts for automation |
 
 ### Benefits
 
-✅ **Node can restart**: Preserves essential recent block data  
+✅ **Node can restart**: Preserves essential recent batch data  
 ✅ **Space saving**: Removes historical data that's rarely accessed  
-✅ **Configurable**: Adjust retention based on your needs  
+✅ **Configurable**: Adjust batch retention based on your needs  
 ✅ **Safe**: Never deletes SMT or critical system tables  
 ✅ **Well-documented**: Comprehensive analysis of all 192 table formats available
+✅ **ZK-friendly**: Maintains complete batch integrity for proof generation
+✅ **Automation-ready**: `--yes` flag for non-interactive operation
 
 ### 📚 Complete Documentation
 
@@ -346,66 +337,16 @@ For detailed analysis of all database tables:
 
 </details>
 
-### **Aggressive Pruning - Deletes ~150+ tables**
 
-**Deletes ALL non-critical tables, keeps only operational necessities:**
-
-<details>
-<summary>📋 Aggressive additional deletions (50+ more tables)</summary>
-
-#### **🔥 Basic Block Tables (21 tables)**
-```
-❌ HeaderNumber              # Block header numbers
-❌ BadHeaderNumber           # Bad block header numbers
-❌ HeadersTotalDifficulty    # Headers total difficulty
-❌ BlockBody                 # Block bodies
-❌ Header                    # Block headers
-❌ BlockTransaction          # Block transactions
-❌ Receipt                   # Transaction receipts
-❌ TxSender                  # Transaction senders
-❌ CanonicalHeader           # Canonical headers
-❌ BlockRoot                 # Block roots
-❌ BlockRootToBlockHash      # Block root to block hash mapping
-❌ BlockRootToBlockNumber    # Block root to block number mapping
-❌ BlockRootToKzgCommitments # Block root to KZG commitments
-❌ LastBlock                 # Last block
-❌ LastHeader                # Last header
-❌ MaxTxNum                  # Max transaction number
-❌ TransactionLog            # Transaction logs
-❌ NonCanonicalTransaction   # Non-canonical transactions
-❌ BlockTransactionLookup    # Block transaction lookup
-❌ BlockBorTransactionLookup # Block Bor transaction lookup
-❌ InnerTx                   # Inner transactions
-```
-
-#### **🔥 Remaining State Data Tables (6 tables)**
-```
-❌ Code                      # Contract code
-❌ StateEvents               # State events
-❌ StateRoot                 # State roots
-❌ IncarnationMap            # Incarnation mapping
-❌ plain_state_version       # Plain state version
-```
-
-#### **🔥 Remaining System Tables (4 tables)**
-```
-❌ Snapshots                 # Snapshots
-❌ erigon_versions           # Erigon versions
-❌ Issuance                  # Issuance
-❌ Sequence                  # Sequence
-```
-
-**⚠️ Aggressive preserves ONLY:** 23 critical tables (PlainState + SMT + essential ZKEVM + system config)
-
-</details>
 
 #### Pruning Strategy Breakdown
 
 | Level | Tables Deleted | Space Saved | Risk Level | Use Case |
 |-------|----------------|-------------|------------|----------|
 | **Conservative** | ~50 tables | 15-20% | 🟢 Low | First-time use, debugging |
-| **Moderate** ⭐ | ~97 tables | 37% | 🟡 Medium | Sequencer operation |
-| **Aggressive** | ~150+ tables | 50-60% | 🔴 High | Extreme space saving |
+| **Moderate** ⭐ | ~97 tables | 37% | 🟡 Medium | Sequencer operation, batch-based |
+
+**🆕 NEW**: Moderate level now uses batch-based pruning strategy for better zkEVM compatibility
 
 #### Usage
 
@@ -413,18 +354,20 @@ For detailed analysis of all database tables:
 cd cmd/prune-smt-data
 
 # Using main program
-go run main.go prune-chaindata /path/to/erigon/data                    # Conservative (no partial pruning)
-go run main.go prune-chaindata /path/to/erigon/data moderate          # Moderate (default: keep 100 recent blocks in 9 tables)
-go run main.go prune-chaindata /path/to/erigon/data aggressive        # Aggressive (default: keep 100 recent blocks in 9 tables)
+go run main.go prune-chaindata /path/to/erigon/data                    # Conservative (no batch pruning)
+go run main.go prune-chaindata /path/to/erigon/data moderate          # Moderate (default: keep 10 recent batches)
 
-# With custom recent blocks count (for moderate/aggressive levels)
-go run main.go prune-chaindata /path/to/erigon/data moderate --keep-recent-blocks 50    # Keep only 50 recent blocks
-go run main.go prune-chaindata /path/to/erigon/data aggressive --keep-recent-blocks 200  # Keep 200 recent blocks
+# With custom batch retention
+go run main.go prune-chaindata /path/to/erigon/data moderate --keep-recent-batches 15    # Keep 15 recent batches
+go run main.go prune-chaindata /path/to/erigon/data moderate --keep-recent-batches 5     # Keep only 5 recent batches
 
-# Or using script (Note: scripts don't support --keep-recent-blocks parameter)
+# For automation (skip confirmation prompts)
+go run main.go prune-chaindata /path/to/erigon/data moderate --yes                       # Auto-confirm
+go run main.go prune-chaindata /path/to/erigon/data moderate --keep-recent-batches 20 --yes  # Custom + auto-confirm
+
+# Or using script (Note: scripts don't support new parameters)
 ./prune-chaindata.sh /path/to/erigon/data                             # Conservative
-./prune-chaindata.sh /path/to/erigon/data moderate                    # Moderate
-./prune-chaindata.sh /path/to/erigon/data aggressive                  # Aggressive
+./prune-chaindata.sh /path/to/erigon/data moderate                    # Moderate (default settings)
 ```
 
 ## Directory Structure
@@ -456,8 +399,8 @@ go run main.go list-tables /path/to/erigon/data
 
 # Prune chaindata
 go run main.go prune-chaindata /path/to/erigon/data                    # Conservative
-go run main.go prune-chaindata /path/to/erigon/data moderate          # Moderate
-go run main.go prune-chaindata /path/to/erigon/data aggressive        # Aggressive
+go run main.go prune-chaindata /path/to/erigon/data moderate          # Moderate (batch-based)
+go run main.go prune-chaindata /path/to/erigon/data moderate --yes    # Moderate (no prompts)
 ```
 
 ## Features
@@ -488,7 +431,8 @@ go run main.go prune-chaindata /path/to/erigon/data aggressive        # Aggressi
 - All pruning operations are **irreversible**
 - Deleted data will be **permanently lost**
 - **Backup your database** before operations
-- Aggressive pruning will delete all block and transaction data - use with extreme caution
+- Moderate pruning uses batch-based deletion - historical batches will be permanently removed
+- Use `--yes` flag carefully in automation scripts - it skips all confirmation prompts
 
 ## Development Roadmap
 
@@ -514,7 +458,7 @@ This directory is planned to include more SMT data management tools:
 |------|------------|------|------------|----------|----------------|
 | 1 | `HermezSmt` | 520.0 KB | 30.7% | SMT | 🔒 **Never Deleted** |
 | 2 | `Header` | 152.0 KB | 9.0% | Block Data | 🔥 Deleted in Moderate+ |
-| 3 | `Code` | 104.0 KB | 6.1% | State Data | ⚠️ Deleted in Aggressive (breaks contracts) |
+| 3 | `Code` | 104.0 KB | 6.1% | State Data | ✅ Preserved in all levels |
 | 4 | `StorageChangeSet` | 88.0 KB | 5.2% | History | 🔥 Deleted in Conservative+ |
 | 5 | `HermezSmtMetadata` | 64.0 KB | 3.8% | SMT | 🔒 **Never Deleted** |
 | 6 | `BlockTransaction` | 56.0 KB | 3.3% | Block Data | 🔥 Deleted in Moderate+ |
@@ -533,7 +477,7 @@ This directory is planned to include more SMT data management tools:
 |----------|------------|---------------|-------------|----------------|
 | **🔒 SMT Related** | 648 KB | **38.2%** | 6 tables | Never deleted |
 | **📦 Block Data** | 368 KB | **21.7%** | 21 tables | Conservative: ✅ Moderate: 🔥 |
-| **💾 State Data** | 256 KB | **15.1%** | 15 tables | Conservative: ✅ Moderate: 🔥 Aggressive: 🔥 |
+| **💾 State Data** | 256 KB | **15.1%** | 15 tables | Conservative: ✅ Moderate: 🔥 |
 | **📜 History Data** | 184 KB | **10.8%** | 12 tables | All levels: 🔥 |
 | **🏗️ ZKEVM Data** | 112 KB | **6.6%** | 35 tables | Critical ones protected |
 | **📋 Log/Index Data** | 40 KB | **2.4%** | 15 tables | All levels: 🔥 |
@@ -545,8 +489,7 @@ This directory is planned to include more SMT data management tools:
 | Level | Tables Deleted | Space Saved | % Saved | What Gets Deleted |
 |-------|----------------|-------------|---------|-------------------|
 | **Conservative** | ~50 tables | ~250-300 KB | **15-18%** | History + Index + Trie + Beacon |
-| **Moderate** ⭐ | ~97 tables | ~624 KB | **36.8%** | + Block Data + Some State |
-| **Aggressive** | ~150+ tables | ~850-1000 KB | **50-60%** | + Most State + Domain Tables |
+| **Moderate** ⭐ | ~97 tables | ~624 KB | **36.8%** | + Historical Batch Data + Some State |
 
 ### Key Insights
 
@@ -554,7 +497,7 @@ This directory is planned to include more SMT data management tools:
 2. **📦 Block Data is Major Target (21.7%)**: Historical block data is the best candidate for space savings
 3. **📜 History Data Worth Deleting (10.8%)**: Account/storage history provides good savings with minimal impact
 4. **💡 Moderate Level Optimal**: Saves 37% space while preserving operational capabilities
-5. **⚠️ Code Table Critical for Contracts**: The `Code` table (104KB, 6.1%) stores smart contract bytecode - deleting it (Aggressive level) prevents contract execution but allows pure state maintenance
+5. **✅ Code Table Protected**: The `Code` table (104KB, 6.1%) stores smart contract bytecode - now preserved in all pruning levels to maintain contract execution capabilities
 
 ## Table Coverage Statistics
 

@@ -13,10 +13,10 @@ import (
 	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	mdbxpkg "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/smt/pkg/db"
+	"github.com/ledgerwatch/erigon/zk/hermez_db"
 
 	logv3 "github.com/ledgerwatch/log/v3"
 )
@@ -27,7 +27,6 @@ type PruneLevel int
 const (
 	PruneLevelConservative PruneLevel = iota // Conservative pruning
 	PruneLevelModerate                       // Moderate pruning
-	PruneLevelAggressive                     // Aggressive pruning
 )
 
 // LatestBlockInfo stores essential information of the latest block
@@ -65,157 +64,188 @@ func getLatestBlockNumber(tx kv.RwTx) (uint64, error) {
 	return blockNumber, nil
 }
 
-// extractBlockNumberFromKey extracts block number from table key based on table structure
-func extractBlockNumberFromKey(key []byte, tableName string) (uint64, error) {
-	switch tableName {
-	case "Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader":
-		// These tables use block number (8 bytes, big endian) as key
-		if len(key) < 8 {
-			return 0, fmt.Errorf("key too short for %s: %d bytes", tableName, len(key))
-		}
-		return binary.BigEndian.Uint64(key[:8]), nil
-
-	case "TransactionLog":
-		// Format: blockNum(8) + txIndex(4) + logIndex(4)
-		if len(key) < 8 {
-			return 0, fmt.Errorf("key too short for %s: %d bytes", tableName, len(key))
-		}
-		return binary.BigEndian.Uint64(key[:8]), nil
-
-	default:
-		return 0, fmt.Errorf("unsupported table for block number extraction: %s", tableName)
+// getLatestBatchNumber reads the latest batch number from BLOCKBATCHES table
+func getLatestBatchNumber(tx kv.Tx) (uint64, error) {
+	c, err := tx.Cursor(hermez_db.BLOCKBATCHES)
+	if err != nil {
+		return 0, err
 	}
+	defer c.Close()
+
+	// get the last entry from the table
+	k, v, err := c.Last()
+	if err != nil {
+		return 0, err
+	}
+	if k == nil {
+		return 0, nil
+	}
+
+	return hermez_db.BytesToUint64(v), nil
 }
 
-// partialPruneHeaderNumberTable handles HeaderNumber table which has value-based block numbers
-func partialPruneHeaderNumberTable(tx kv.RwTx, pruneBeforeBlock uint64) error {
-	cursor, err := tx.RwCursor("HeaderNumber")
+// partialPruneBatchTables performs batch-based pruning on block-related tables
+func partialPruneBatchTables(tx kv.RwTx, keepRecentBatches uint64) error {
+	hermezDb := hermez_db.NewHermezDbReader(tx)
+
+	// 1. Get latest batch number
+	latestBatch, err := getLatestBatchNumber(tx)
 	if err != nil {
-		return fmt.Errorf("failed to open HeaderNumber cursor: %w", err)
-	}
-	defer cursor.Close()
-
-	var keysToDelete [][]byte
-
-	for key, value, err := cursor.First(); key != nil; key, value, err = cursor.Next() {
-		if err != nil {
-			return fmt.Errorf("failed to iterate HeaderNumber: %w", err)
-		}
-
-		// HeaderNumber value is block number (8 bytes, big endian)
-		if len(value) >= 8 {
-			blockNumber := binary.BigEndian.Uint64(value[:8])
-			if blockNumber < pruneBeforeBlock {
-				// Make a copy of the key
-				keysCopy := make([]byte, len(key))
-				copy(keysCopy, key)
-				keysToDelete = append(keysToDelete, keysCopy)
-			}
-		}
+		return fmt.Errorf("failed to get latest batch number: %w", err)
 	}
 
-	// Delete collected keys
-	for _, key := range keysToDelete {
-		key2, _, err := cursor.SeekExact(key)
-		if err != nil || key2 == nil {
-			return fmt.Errorf("failed to seek to key for deletion: %w", err)
-		}
-		if err := cursor.DeleteCurrent(); err != nil {
-			return fmt.Errorf("failed to delete HeaderNumber entry: %w", err)
-		}
-	}
+	fmt.Printf("Latest batch number: %d\n", latestBatch)
+	fmt.Printf("Keeping recent %d batches\n", keepRecentBatches)
 
-	fmt.Printf("    HeaderNumber: deleted %d entries before block %d\n", len(keysToDelete), pruneBeforeBlock)
-	return nil
-}
-
-// partialPruneTable performs partial pruning on a table, keeping recent blocks
-func partialPruneTable(tx kv.RwTx, tableName string, pruneBeforeBlock uint64) error {
-	cursor, err := tx.RwCursor(tableName)
-	if err != nil {
-		return fmt.Errorf("failed to open %s cursor: %w", tableName, err)
-	}
-	defer cursor.Close()
-
-	var keysToDelete [][]byte
-
-	// First pass: collect keys to delete
-	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.Next() {
-		if err != nil {
-			return fmt.Errorf("failed to iterate %s: %w", tableName, err)
-		}
-
-		blockNumber, err := extractBlockNumberFromKey(key, tableName)
-		if err != nil {
-			// Skip entries we can't parse
-			continue
-		}
-
-		if blockNumber < pruneBeforeBlock {
-			// Make a copy of the key
-			keysCopy := make([]byte, len(key))
-			copy(keysCopy, key)
-			keysToDelete = append(keysToDelete, keysCopy)
-		}
-	}
-
-	// Second pass: delete collected keys
-	for _, key := range keysToDelete {
-		key2, _, err := cursor.SeekExact(key)
-		if err != nil || key2 == nil {
-			return fmt.Errorf("failed to seek to key for deletion: %w", err)
-		}
-		if err := cursor.DeleteCurrent(); err != nil {
-			return fmt.Errorf("failed to delete %s entry: %w", tableName, err)
-		}
-	}
-
-	fmt.Printf("    %s: deleted %d entries before block %d\n", tableName, len(keysToDelete), pruneBeforeBlock)
-	return nil
-}
-
-// partialPruneBlockTables performs partial pruning on block-related tables
-func partialPruneBlockTables(tx kv.RwTx, keepRecentBlocks uint64) error {
-	latestBlock, err := getLatestBlockNumber(tx)
-	if err != nil {
-		return fmt.Errorf("failed to get latest block number: %w", err)
-	}
-
-	fmt.Printf("Latest block number: %d\n", latestBlock)
-	fmt.Printf("Keeping recent %d blocks\n", keepRecentBlocks)
-
-	var pruneBeforeBlock uint64
-	if latestBlock > keepRecentBlocks {
-		pruneBeforeBlock = latestBlock - keepRecentBlocks + 1
+	// 2. Calculate batch range to keep
+	var pruneBefore uint64
+	if latestBatch > keepRecentBatches {
+		pruneBefore = latestBatch - keepRecentBatches + 1
 	} else {
-		pruneBeforeBlock = 0
-	}
-
-	fmt.Printf("Will delete data for blocks < %d\n", pruneBeforeBlock)
-
-	if pruneBeforeBlock == 0 {
-		fmt.Printf("No blocks to prune (total blocks <= keep recent blocks)\n")
+		fmt.Printf("No batches to prune (total batches <= keep recent batches)\n")
 		return nil
 	}
 
-	// Tables that support partial pruning (key-based block number)
-	partialPruneTables := []string{
-		"Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader", "TransactionLog",
+	fmt.Printf("Will delete data for batches < %d\n", pruneBefore)
+
+	// 3. Execute batch-level pruning
+	return executeBatchBasedPruning(tx, hermezDb, pruneBefore)
+}
+
+// executeBatchBasedPruning performs the actual batch-based pruning
+func executeBatchBasedPruning(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, pruneBefore uint64) error {
+	fmt.Printf("Starting batch-level data pruning...\n")
+
+	deletedBatches := 0
+	deletedBlocks := 0
+
+	// Iterate through all batches to delete
+	for batchNo := uint64(0); batchNo < pruneBefore; batchNo++ {
+		// Get all blocks in this batch
+		blockNos, err := hermezDb.GetL2BlockNosByBatch(batchNo)
+		if err != nil {
+			// Skip if batch doesn't exist
+			continue
+		}
+
+		if len(blockNos) == 0 {
+			continue
+		}
+
+		fmt.Printf("Deleting batch %d, containing %d blocks\n", batchNo, len(blockNos))
+
+		// Delete all block data in this batch
+		for _, blockNo := range blockNos {
+			err := deleteBlockData(tx, blockNo)
+			if err != nil {
+				fmt.Printf("Warning: failed to delete block %d data: %v\n", blockNo, err)
+				continue
+			}
+			deletedBlocks++
+		}
+
+		// Delete batch-related metadata
+		err = deleteBatchMetadata(tx, batchNo)
+		if err != nil {
+			fmt.Printf("Warning: failed to delete batch %d metadata: %v\n", batchNo, err)
+		}
+
+		deletedBatches++
 	}
 
-	// Process regular tables
-	for _, tableName := range partialPruneTables {
-		err := partialPruneTable(tx, tableName, pruneBeforeBlock)
+	fmt.Printf("Batch pruning completed: deleted %d batches, %d blocks\n", deletedBatches, deletedBlocks)
+	return nil
+}
+
+// deleteBlockData deletes all data related to a specific block
+func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
+	blockKey := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockKey, blockNo)
+
+	// Delete block-related table data
+	tables := []string{"Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader"}
+
+	for _, table := range tables {
+		err := tx.Delete(table, blockKey)
 		if err != nil {
-			fmt.Printf("    Warning: failed to partially prune %s: %v\n", tableName, err)
-			continue
+			return fmt.Errorf("failed to delete %s for block %d: %w", table, blockNo, err)
 		}
 	}
 
-	// Special handling for HeaderNumber (value-based block number)
-	err = partialPruneHeaderNumberTable(tx, pruneBeforeBlock)
+	// Special handling for TransactionLog table (needs iteration)
+	err := deleteTransactionLogs(tx, blockNo)
 	if err != nil {
-		fmt.Printf("    Warning: failed to partially prune HeaderNumber: %v\n", err)
+		return fmt.Errorf("failed to delete transaction logs for block %d: %w", blockNo, err)
+	}
+
+	return nil
+}
+
+// deleteTransactionLogs deletes transaction logs for a specific block
+func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
+	cursor, err := tx.RwCursor("TransactionLog")
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// TransactionLog format: blockNum(8) + txIndex(4) + logIndex(4)
+	blockPrefix := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockPrefix, blockNo)
+
+	var keysToDelete [][]byte
+	for key, _, err := cursor.Seek(blockPrefix); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+
+		if len(key) < 8 {
+			break
+		}
+
+		// Check if it belongs to current block
+		keyBlockNo := binary.BigEndian.Uint64(key[:8])
+		if keyBlockNo != blockNo {
+			break
+		}
+
+		keysToDelete = append(keysToDelete, common.Copy(key))
+	}
+
+	// Delete all found keys
+	for _, key := range keysToDelete {
+		err := tx.Delete("TransactionLog", key)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteBatchMetadata deletes batch-related metadata
+func deleteBatchMetadata(tx kv.RwTx, batchNo uint64) error {
+	batchKey := hermez_db.Uint64ToBytes(batchNo)
+
+	// Delete batch-related hermez table data
+	batchTables := []string{
+		hermez_db.BATCH_BLOCKS,
+		hermez_db.FORKIDS,
+		hermez_db.STATE_ROOTS,
+		hermez_db.GLOBAL_EXIT_ROOTS_BATCHES,
+		hermez_db.BATCH_WITNESSES,
+		hermez_db.BATCH_COUNTERS,
+		hermez_db.L1_BATCH_DATA,
+		hermez_db.LATEST_USED_GER,
+		hermez_db.BATCH_ENDS,
+	}
+
+	for _, table := range batchTables {
+		err := tx.Delete(table, batchKey)
+		if err != nil {
+			// Some tables may not have corresponding batch data, this is normal
+			continue
+		}
 	}
 
 	return nil
@@ -282,13 +312,13 @@ func getTableStats(db kv.RwDB, tableName string, pageSize uint64) (uint64, uint6
 func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *mdbx2.EnvInfo, error) {
 	ctx := context.Background()
 
-	var opts mdbx.MdbxOpts
+	var opts mdbxpkg.MdbxOpts
 	if label == kv.ChainDB {
-		opts = mdbx.NewMDBX(log).Path(dbPath).Label(label).WithTableCfg(mdbx.WithChaindataTables)
+		opts = mdbxpkg.NewMDBX(log).Path(dbPath).Label(label).WithTableCfg(mdbxpkg.WithChaindataTables)
 	} else {
 		// SMT database uses different configuration
 		kv.InitStandaloneSMT(false) // Standalone SMT database
-		opts = mdbx.NewMDBX(log).Path(dbPath).Label(label)
+		opts = mdbxpkg.NewMDBX(log).Path(dbPath).Label(label)
 	}
 
 	// Get database info
@@ -548,13 +578,6 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 			}
 		}
 
-	case PruneLevelAggressive:
-		// Aggressive: delete all non-critical tables
-		for _, table := range allTables {
-			if !critical[table] {
-				toDelete = append(toDelete, table)
-			}
-		}
 	}
 
 	return toDelete
@@ -566,8 +589,6 @@ func getPruneLevelName(level PruneLevel) string {
 		return "Conservative"
 	case PruneLevelModerate:
 		return "Moderate"
-	case PruneLevelAggressive:
-		return "Aggressive"
 	default:
 		return "Conservative"
 	}
@@ -579,16 +600,20 @@ func main() {
 
 	args := os.Args[1:]
 	if len(args) < 1 {
-		log.Error("Usage: prune-chaindata <db_path> [level] [--keep-recent-blocks N]")
-		log.Error("Levels: conservative (default), moderate, aggressive")
-		log.Error("Options: --keep-recent-blocks N (default: 100, for moderate/aggressive)")
+		log.Error("Usage: prune-chaindata <db_path> [level] [options]")
+		log.Error("Levels: conservative (default), moderate")
+		log.Error("Options:")
+		log.Error("  --keep-recent-batches N    Keep recent N batches (default: 10)")
+		log.Error("  --yes, -y                  Skip confirmation prompts")
+		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
 		os.Exit(1)
 	}
 
 	// Parse arguments
 	dbPath := args[0]
 	pruneLevel := PruneLevelConservative
-	keepRecentBlocks := uint64(100) // Default: keep recent 100 blocks
+	keepRecentBatches := uint64(10) // Default: keep recent 10 batches
+	autoYes := false                // Default: require user confirmation
 
 	// Parse pruning level and optional parameters
 	for i := 1; i < len(args); i++ {
@@ -598,35 +623,37 @@ func main() {
 			pruneLevel = PruneLevelConservative
 		case arg == "moderate":
 			pruneLevel = PruneLevelModerate
-		case arg == "aggressive":
-			pruneLevel = PruneLevelAggressive
-		case strings.HasPrefix(arg, "--keep-recent-blocks"):
+
+		case strings.HasPrefix(arg, "--keep-recent-batches"):
 			if strings.Contains(arg, "=") {
-				// Format: --keep-recent-blocks=N
+				// Format: --keep-recent-batches=N
 				parts := strings.Split(arg, "=")
 				if len(parts) == 2 {
-					if blocks, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
-						keepRecentBlocks = blocks
+					if batches, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
+						keepRecentBatches = batches
 					} else {
-						log.Error("Invalid number for --keep-recent-blocks: %s", parts[1])
+						log.Error("Invalid number for --keep-recent-batches: %s", parts[1])
 						os.Exit(1)
 					}
 				}
 			} else {
-				// Format: --keep-recent-blocks N
+				// Format: --keep-recent-batches N
 				if i+1 < len(args) {
-					if blocks, err := strconv.ParseUint(args[i+1], 10, 64); err == nil {
-						keepRecentBlocks = blocks
+					if batches, err := strconv.ParseUint(args[i+1], 10, 64); err == nil {
+						keepRecentBatches = batches
 						i++ // Skip next argument
 					} else {
-						log.Error("Invalid number for --keep-recent-blocks: %s", args[i+1])
+						log.Error("Invalid number for --keep-recent-batches: %s", args[i+1])
 						os.Exit(1)
 					}
 				} else {
-					log.Error("--keep-recent-blocks requires a number")
+					log.Error("--keep-recent-batches requires a number")
 					os.Exit(1)
 				}
 			}
+		case arg == "--yes" || arg == "-y":
+			autoYes = true
+
 		default:
 			// If it's not a flag and not the first arg (db path), check if it's a level
 			if i == 1 { // Second argument is level
@@ -635,10 +662,8 @@ func main() {
 					pruneLevel = PruneLevelConservative
 				case "moderate":
 					pruneLevel = PruneLevelModerate
-				case "aggressive":
-					pruneLevel = PruneLevelAggressive
 				default:
-					log.Error("Invalid level. Use: conservative, moderate, or aggressive")
+					log.Error("Invalid level. Use: conservative or moderate")
 					os.Exit(1)
 				}
 			}
@@ -652,8 +677,8 @@ func main() {
 	fmt.Printf("Chaindata path: %s\n", dbMainDBPath)
 	fmt.Printf("SMT path: %s\n", dbSMTDBPath)
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
-	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
-		fmt.Printf("Keep recent blocks: %d\n", keepRecentBlocks)
+	if pruneLevel == PruneLevelModerate {
+		fmt.Printf("Keep recent batches: %d\n", keepRecentBatches)
 	}
 
 	// Check if chaindata database file exists
@@ -739,28 +764,27 @@ func main() {
 		fmt.Printf("Deletes: History data, indexes, Trie, Beacon tables\n")
 	case PruneLevelModerate:
 		fmt.Printf("Moderate pruning: Delete more unnecessary tables but keep essential data\n")
-		fmt.Printf("Preserves: Core state data, sync progress, ZKEVM data, some block data\n")
-		fmt.Printf("Deletes: History data, indexes, some state tables\n")
-	case PruneLevelAggressive:
-		fmt.Printf("Aggressive pruning: Delete almost all tables, keep only operational necessities\n")
-		fmt.Printf("Preserves: PlainState (current state), sync progress, critical ZKEVM data\n")
-		fmt.Printf("Deletes: All block data, transaction data, most state data\n")
-		fmt.Printf("⚠️  WARNING: Aggressive pruning will delete all block and transaction data!\n")
+		fmt.Printf("Preserves: Core state data, sync progress, ZKEVM data, recent batch data\n")
+		fmt.Printf("Deletes: History data, indexes, some state tables, old batch data\n")
+		fmt.Printf("🆕 NEW: Uses batch-based pruning (keeps recent batches, better for zkEVM architecture)\n")
+
 	}
 
 	// Ask for user confirmation
 	fmt.Printf("\n⚠️  WARNING: This operation will permanently delete the above table data!\n")
-	if pruneLevel == PruneLevelAggressive {
-		fmt.Printf("⚠️  Aggressive pruning will delete all block, transaction, and state data - cannot be recovered!\n")
-	}
-	fmt.Printf("Please enter 'yes' to confirm deletion: ")
 
-	var confirm string
-	fmt.Scanln(&confirm)
+	if !autoYes {
+		fmt.Printf("Please enter 'yes' to confirm deletion: ")
 
-	if confirm != "yes" {
-		fmt.Printf("Operation cancelled\n")
-		return
+		var confirm string
+		fmt.Scanln(&confirm)
+
+		if confirm != "yes" {
+			fmt.Printf("Operation cancelled\n")
+			return
+		}
+	} else {
+		fmt.Printf("Auto-confirmed with --yes flag\n")
 	}
 
 	// Begin write transaction
@@ -772,13 +796,15 @@ func main() {
 	}
 	defer tx.Rollback()
 
-	// Perform partial pruning for moderate/aggressive levels first
-	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
-		fmt.Printf("\nPerforming partial pruning of block tables...\n")
-		err = partialPruneBlockTables(tx, keepRecentBlocks)
+	// Perform batch-based pruning for moderate level
+	if pruneLevel == PruneLevelModerate {
+		fmt.Printf("\n=== Executing Batch-based Pruning Strategy ===\n")
+		err = partialPruneBatchTables(tx, keepRecentBatches)
 		if err != nil {
-			log.Error("Failed to perform partial block pruning", "error", err)
+			log.Error("Failed to perform batch-based pruning", "error", err)
 			// Continue with regular deletion instead of exiting
+		} else {
+			fmt.Printf("✓ Batch-based pruning completed successfully!\n")
 		}
 	}
 
@@ -795,7 +821,7 @@ func main() {
 
 	for _, table := range toDelete {
 		// Skip block tables if we did partial pruning
-		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
+		if pruneLevel == PruneLevelModerate && partiallyPrunedTables[table] {
 			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
 			continue
 		}
@@ -822,8 +848,4 @@ func main() {
 	fmt.Printf("Remaining tables: %d\n", len(allTables)-deletedCount)
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
 
-	if pruneLevel == PruneLevelAggressive {
-		fmt.Printf("\nNote: Aggressive pruning has cleared all block, transaction, and state data!\n")
-		fmt.Printf("Only essential operational data remains for sequencer operation.\n")
-	}
 }
