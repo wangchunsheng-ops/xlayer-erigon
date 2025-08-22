@@ -1205,7 +1205,12 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 
 		l1InfoTreeUpdater := l1infotree.NewUpdater(cfg.Zk, l1InfoTreeSyncer)
 
-		// All nodes need l1BlockSyncer (Sequencer node uses it for its own functions)
+		var dataStreamServer server.DataStreamServer
+		if backend.streamServer != nil {
+			dataStreamServer = dataStreamServerFactory.CreateDataStreamServer(backend.streamServer, backend.chainConfig.ChainID.Uint64())
+		}
+
+		// Create L1 syncers based on node type
 		l1BlockSyncer := syncer.NewL1Syncer(
 			ctx,
 			ethermanClients,
@@ -1220,7 +1225,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			cfg.Zk.XLayer.GetLogsRetries,
 		)
 
-		// Only RPC nodes need additional Sequencer L1 event syncer
 		var sequencerL1Syncer *syncer.L1Syncer
 		if !isSequencer {
 			sequencerL1Syncer = syncer.NewL1Syncer(
@@ -1242,11 +1246,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			)
 
 			log.Info("RPC node: Created dedicated Sequencer L1 syncer for event pre-synchronization")
-		}
-
-		var dataStreamServer server.DataStreamServer
-		if backend.streamServer != nil {
-			dataStreamServer = dataStreamServerFactory.CreateDataStreamServer(backend.streamServer, backend.chainConfig.ChainID.Uint64())
 		}
 
 		if isSequencer {
