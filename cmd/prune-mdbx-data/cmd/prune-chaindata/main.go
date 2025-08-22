@@ -508,12 +508,11 @@ func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *md
 
 	newMapSize := datasize.ByteSize(in.MapSize)
 
-	// Open database
+	// Open database with conservative flags to match sequencer
 	db, err := opts.Flags(func(flags uint) uint {
-		newFlags := int(in.Flags)
-		newFlags &= ^mdbx2.Readonly
-		newFlags |= mdbx2.WriteMap
-		return uint(newFlags)
+		// Use conservative flags that match sequencer defaults
+		// Remove problematic flags and use standard configuration
+		return uint(mdbx2.NoReadahead | mdbx2.Coalesce | mdbx2.Durable)
 	}).PageSize(uint64(in.PageSize)).MapSize(newMapSize).Open(ctx)
 
 	if err != nil {
