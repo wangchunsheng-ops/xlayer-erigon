@@ -1147,7 +1147,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			}}
 			l1Contracts = []libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup}
 		} else {
-			// RPC node: only sync original verification events, keeping original logic unchanged
 			l1Topics = seqAndVerifTopics
 			l1Contracts = seqAndVerifL1Contracts
 		}
@@ -1204,7 +1203,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		// For X Layer, apollo
 		backend.l1InfoTreeSyncer = l1InfoTreeSyncer
 
-		// Both RPC and Sequencer use the same L1InfoTree configuration, issue is not here
 		l1InfoTreeUpdater := l1infotree.NewUpdater(cfg.Zk, l1InfoTreeSyncer)
 
 		// All nodes need l1BlockSyncer (Sequencer node uses it for its own functions)

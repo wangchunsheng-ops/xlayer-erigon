@@ -182,9 +182,7 @@ Loop:
 				case logIncompatible:
 					continue
 				default:
-					// For unknown topics (such as Sequencer events), silently skip without warnings
-					// These events will be handled in dedicated StageL1SequencerSync
-					continue
+					log.Warn("L1 Syncer unknown topic", "topic", l.Topics[0])
 				}
 			}
 		case progressMessage := <-progressMessageChan:
