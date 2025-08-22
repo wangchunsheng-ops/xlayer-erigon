@@ -164,7 +164,14 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 	binary.BigEndian.PutUint64(blockKey, blockNo)
 
 	// Delete simple block-related table data (key = block_num_u64)
-	simpleTables := []string{"Receipt", "CanonicalHeader"}
+	simpleTables := []string{
+		"Receipt",
+		"CanonicalHeader",
+		// zkEVM specific tables with block_number keys
+		"hermez_blockBatches",      // l2blockno -> batchno
+		"block_info_roots",         // block number -> block info root hash
+		"block_l1_info_tree_index", // block number -> l1 info tree index
+	}
 	for _, table := range simpleTables {
 		err := tx.Delete(table, blockKey)
 		if err != nil {
@@ -728,8 +735,9 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 		// Additional deletes for Moderate mode - transaction lookup optimization tables
 		// For sequence nodes: these tables provide query optimization but BlockBody already contains transactions
 		transactionOptimizationDeletes := []string{
-			"BlockTransaction",       // Complete transaction RLP data (redundant with BlockBody)
-			"BlockTransactionLookup", // Hash-to-block lookup index (not essential for sequence nodes)
+			"BlockTransaction",         // Complete transaction RLP data (redundant with BlockBody)
+			"BlockTransactionLookup",   // Hash-to-block lookup index (not essential for sequence nodes)
+			"hermez_txPricePercentage", // Transaction pricing data (for RPC queries only, not core functionality)
 		}
 
 		// Add transaction optimization tables to delete list
@@ -976,10 +984,10 @@ func main() {
 		fmt.Printf("Moderate pruning: Comprehensive cleanup with batch-based optimization\n")
 		fmt.Printf("Strategy: Delete unnecessary tables + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
 		fmt.Printf("Preserves: Recent batch data, core state data, zkEVM operational tables\n")
-		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Transaction optimization (2), Diagnostic (5), + old batch data\n",
+		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Transaction optimization (3), Diagnostic (5), + old batch data\n",
 			getTableCategoryCount("History Data Tables"), getTableCategoryCount("Index Tables"),
 			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"))
-		fmt.Printf("🎯 zkEVM optimized: Complete cleanup for sequence nodes (deletes BlockTransaction + lookup tables)\n")
+		fmt.Printf("🎯 zkEVM optimized: Complete cleanup for sequence nodes (deletes BlockTransaction + lookup + pricing tables)\n")
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	}
