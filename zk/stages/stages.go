@@ -283,11 +283,10 @@ func DefaultZkStages(
 			ID:          stages2.L1SequencerSyncer,
 			Description: "L1 Sequencer Sync Updates",
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, u stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
-				// Only RPC nodes (l1SequencerSyncCfg.syncer != nil) execute this stage
 				if l1SequencerSyncCfg.syncer != nil {
 					return SpawnL1SequencerSyncStage(s, u, txc.Tx, l1SequencerSyncCfg, ctx, logger)
 				}
-				return nil // Sequencer node skips
+				return nil
 			},
 			Unwind: func(firstCycle bool, u *stages.UnwindState, s *stages.StageState, txc wrap.TxContainer, logger log.Logger) error {
 				if l1SequencerSyncCfg.syncer != nil {
@@ -319,11 +318,10 @@ func DefaultZkStages(
 			ID:          stages2.L1BlockSync,
 			Description: "L1 Sequencer L1 Block Sync",
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *stages.StageState, unwinder stages.Unwinder, txc wrap.TxContainer, logger log.Logger) error {
-				// Only RPC nodes (sequencerL1BlockSyncCfg.syncer != nil) execute this stage
 				if sequencerL1BlockSyncCfg.syncer != nil {
 					return SpawnSequencerL1BlockSyncStage(s, unwinder, ctx, txc.Tx, sequencerL1BlockSyncCfg, logger)
 				}
-				return nil // Sequencer node skips
+				return nil
 			},
 			Unwind: func(firstCycle bool, u *stages.UnwindState, s *stages.StageState, txc wrap.TxContainer, logger log.Logger) error {
 				if sequencerL1BlockSyncCfg.syncer != nil {
