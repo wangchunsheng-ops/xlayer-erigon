@@ -171,6 +171,9 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 		"hermez_blockBatches",      // l2blockno -> batchno
 		"block_info_roots",         // block number -> block info root hash
 		"block_l1_info_tree_index", // block number -> l1 info tree index
+		// State and SMT tables with block_number keys
+		"plain_state_version", // block number -> state version
+		"smt_depths",          // block number -> smt depth
 	}
 	for _, table := range simpleTables {
 		err := tx.Delete(table, blockKey)
