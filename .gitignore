@@ -119,6 +119,7 @@ xlayerconfig-testnet.yaml
 **/cover.out
 **/cover.html
 test/mainnet
+test/testnet
 test/lrp/mainnet
 test/lrp/external_ds
 test/*.zip

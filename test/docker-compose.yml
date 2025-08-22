@@ -156,6 +156,26 @@ services:
       - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
       - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
 
+  xlayer-testnet-rpc:
+    container_name: xlayer-testnet-rpc
+    image: cdk-erigon
+    environment:
+      - CDK_ERIGON_SEQUENCER=0
+    ports:
+      - 6061:6060
+      - 8124:8545
+      - 6901:6900
+      - 9091:9095
+    volumes:
+      - ./testnet/rpc:/home/erigon/data/
+      - ./config/xlayerconfig-testnet-rpc.yaml:/usr/src/app/config.yaml
+      # - ./config/polygonzkevm-first-batch-config.json:/usr/src/app/first-batch-config.json
+      - ./config/dynamic-ppxlayer-allocs.json:/usr/src/app/dynamic-ppxlayer-allocs.json
+      - ./config/dynamic-ppxlayer-chainspec.json:/usr/src/app/dynamic-ppxlayer-chainspec.json
+      - ./config/dynamic-ppxlayer-conf.json:/usr/src/app/dynamic-ppxlayer-conf.json
+    command: >
+      cdk-erigon --http.vhosts=* --http.corsdomain=* --ws --config=/usr/src/app/config.yaml
+
   xlayer-approve:
     container_name: xlayer-approve
     image: hermeznetwork/zkevm-node:v0.6.6
