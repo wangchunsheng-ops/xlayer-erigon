@@ -1242,8 +1242,9 @@ func main() {
 	case PruneLevelAggressive:
 		fmt.Printf("Aggressive pruning: Maximum cleanup including historical state data\n")
 		fmt.Printf("Strategy: All moderate mode deletions + historical AccountChangeSet & StorageChangeSet cleanup\n")
-		fmt.Printf("Preserves: Recent %d batches of state history, current PlainState, SMT data, core operational tables\n", keepRecentBatches)
+		fmt.Printf("Preserves: Recent %d batches of state history, SMT data, core operational tables\n", keepRecentBatches)
 		fmt.Printf("Deletes: Same as moderate + historical state change data beyond recent batches\n")
+		fmt.Printf("Note: PlainState (current state) is always preserved as it contains active account/storage data\n")
 		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical state queries not needed\n")
 		fmt.Printf("🚀 Maximum space savings: Optimized for nodes with complete SMT and limited historical query needs\n")
 		fmt.Printf("Best for: Advanced production setups, maximum storage optimization\n")
