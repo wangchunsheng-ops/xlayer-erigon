@@ -1147,7 +1147,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			}}
 			l1Contracts = []libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup}
 		} else {
-			// RPC节点：只同步原有的验证事件，保持原有逻辑不变
+			// RPC node: only sync original verification events, keeping original logic unchanged
 			l1Topics = seqAndVerifTopics
 			l1Contracts = seqAndVerifL1Contracts
 		}
@@ -1204,10 +1204,10 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		// For X Layer, apollo
 		backend.l1InfoTreeSyncer = l1InfoTreeSyncer
 
-		// RPC和Sequencer都使用相同的L1InfoTree配置，问题不在这里
+		// Both RPC and Sequencer use the same L1InfoTree configuration, issue is not here
 		l1InfoTreeUpdater := l1infotree.NewUpdater(cfg.Zk, l1InfoTreeSyncer)
 
-		// 所有节点都需要l1BlockSyncer（Sequencer节点用于自身功能）
+		// All nodes need l1BlockSyncer (Sequencer node uses it for its own functions)
 		l1BlockSyncer := syncer.NewL1Syncer(
 			ctx,
 			ethermanClients,
@@ -1222,7 +1222,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			cfg.Zk.XLayer.GetLogsRetries,
 		)
 
-		// 只有RPC节点才需要额外的Sequencer L1事件同步器
+		// Only RPC nodes need additional Sequencer L1 event syncer
 		var sequencerL1Syncer *syncer.L1Syncer
 		if !isSequencer {
 			sequencerL1Syncer = syncer.NewL1Syncer(
@@ -1366,8 +1366,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.forkValidator,
 				backend.engine,
 				backend.l1Syncer,
-				l1BlockSyncer,     // 添加：L1区块同步器
-				sequencerL1Syncer, // 添加：RPC节点专用的Sequencer L1同步器
+				l1BlockSyncer,     // Added: L1 block syncer
+				sequencerL1Syncer, // Added: RPC node specific Sequencer L1 syncer
 				streamClient,
 				dataStreamServer,
 				l1InfoTreeUpdater,

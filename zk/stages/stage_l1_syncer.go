@@ -182,8 +182,8 @@ Loop:
 				case logIncompatible:
 					continue
 				default:
-					// 对于未知topics（如Sequencer事件），静默跳过，不产生警告
-					// 这些事件会在专门的StageL1SequencerSync中处理
+					// For unknown topics (such as Sequencer events), silently skip without warnings
+					// These events will be handled in dedicated StageL1SequencerSync
 					continue
 				}
 			}
