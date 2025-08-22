@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -162,20 +163,179 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 	blockKey := make([]byte, 8)
 	binary.BigEndian.PutUint64(blockKey, blockNo)
 
-	// Delete block-related table data
-	tables := []string{"Header", "BlockBody", "Receipt", "TxSender", "CanonicalHeader"}
-
-	for _, table := range tables {
+	// Delete simple block-related table data (key = block_num_u64)
+	simpleTables := []string{"Receipt", "CanonicalHeader"}
+	for _, table := range simpleTables {
 		err := tx.Delete(table, blockKey)
 		if err != nil {
 			return fmt.Errorf("failed to delete %s for block %d: %w", table, blockNo, err)
 		}
 	}
 
+	// Special handling for Header table (key = block_num_u64 + hash)
+	err := deleteHeaderData(tx, blockNo)
+	if err != nil {
+		return fmt.Errorf("failed to delete header for block %d: %w", blockNo, err)
+	}
+
+	// Special handling for HeaderNumber table (key = header_hash -> block_num)
+	err = deleteHeaderNumber(tx, blockNo)
+	if err != nil {
+		return fmt.Errorf("failed to delete header number for block %d: %w", blockNo, err)
+	}
+
+	// Special handling for BlockBody table (key = block_num_u64 + hash)
+	err = deleteBlockBodyData(tx, blockNo)
+	if err != nil {
+		return fmt.Errorf("failed to delete block body for block %d: %w", blockNo, err)
+	}
+
+	// Special handling for TxSender table (key = block_num_u64 + blockHash)
+	err = deleteTxSenderData(tx, blockNo)
+	if err != nil {
+		return fmt.Errorf("failed to delete tx sender for block %d: %w", blockNo, err)
+	}
+
 	// Special handling for TransactionLog table (needs iteration)
-	err := deleteTransactionLogs(tx, blockNo)
+	err = deleteTransactionLogs(tx, blockNo)
 	if err != nil {
 		return fmt.Errorf("failed to delete transaction logs for block %d: %w", blockNo, err)
+	}
+
+	return nil
+}
+
+// deleteHeaderData deletes header data for a specific block (key = block_num_u64 + hash)
+func deleteHeaderData(tx kv.RwTx, blockNo uint64) error {
+	cursor, err := tx.RwCursor("Header")
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// Header key format: blockNum(8) + hash(32)
+	blockPrefix := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockPrefix, blockNo)
+
+	var keysToDelete [][]byte
+	for key, _, err := cursor.Seek(blockPrefix); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+		// Check if key starts with our block number prefix
+		if len(key) < 8 || !bytes.Equal(key[:8], blockPrefix) {
+			break // No more entries for this block
+		}
+		keysToDelete = append(keysToDelete, common.Copy(key))
+	}
+
+	// Delete collected keys (two-phase deletion for safety)
+	for _, key := range keysToDelete {
+		if err := tx.Delete("Header", key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteHeaderNumber deletes header number entries for a specific block (key = header_hash -> block_num)
+func deleteHeaderNumber(tx kv.RwTx, blockNo uint64) error {
+	cursor, err := tx.RwCursor("HeaderNumber")
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// HeaderNumber table: header_hash -> block_num_u64
+	// We need to find entries where value equals our block number
+	targetBlockBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(targetBlockBytes, blockNo)
+
+	var keysToDelete [][]byte
+	for key, value, err := cursor.First(); key != nil; key, value, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+		// Check if value equals our target block number
+		if len(value) == 8 && bytes.Equal(value, targetBlockBytes) {
+			keysToDelete = append(keysToDelete, common.Copy(key))
+		}
+	}
+
+	// Delete collected keys (two-phase deletion for safety)
+	for _, key := range keysToDelete {
+		if err := tx.Delete("HeaderNumber", key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteBlockBodyData deletes block body data for a specific block (key = block_num_u64 + hash)
+func deleteBlockBodyData(tx kv.RwTx, blockNo uint64) error {
+	cursor, err := tx.RwCursor("BlockBody")
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// BlockBody key format: blockNum(8) + hash(32)
+	blockPrefix := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockPrefix, blockNo)
+
+	var keysToDelete [][]byte
+	for key, _, err := cursor.Seek(blockPrefix); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+		// Check if key starts with our block number prefix
+		if len(key) < 8 || !bytes.Equal(key[:8], blockPrefix) {
+			break // No more entries for this block
+		}
+		keysToDelete = append(keysToDelete, common.Copy(key))
+	}
+
+	// Delete collected keys (two-phase deletion for safety)
+	for _, key := range keysToDelete {
+		if err := tx.Delete("BlockBody", key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteTxSenderData deletes tx sender data for a specific block (key = block_num_u64 + blockHash)
+func deleteTxSenderData(tx kv.RwTx, blockNo uint64) error {
+	cursor, err := tx.RwCursor("TxSender")
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// TxSender key format: blockNum(8) + blockHash(32)
+	blockPrefix := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockPrefix, blockNo)
+
+	var keysToDelete [][]byte
+	for key, _, err := cursor.Seek(blockPrefix); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return err
+		}
+		// Check if key starts with our block number prefix
+		if len(key) < 8 || !bytes.Equal(key[:8], blockPrefix) {
+			break // No more entries for this block
+		}
+		keysToDelete = append(keysToDelete, common.Copy(key))
+	}
+
+	// Delete collected keys (two-phase deletion for safety)
+	for _, key := range keysToDelete {
+		if err := tx.Delete("TxSender", key); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -511,8 +671,9 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 
 	switch level {
 	case PruneLevelConservative:
-		// Conservative: only delete obviously unnecessary tables
-		deleteCategories := []string{"History Data Tables", "Index Tables", "Trie Tables", "Beacon Tables"}
+		// Conservative: only delete obviously unnecessary tables that are clearly safe
+		// Only delete Beacon tables since zkEVM doesn't use them
+		deleteCategories := []string{"Beacon Tables"}
 		for _, category := range deleteCategories {
 			if tables, exists := categories[category]; exists {
 				for _, table := range tables {
@@ -523,13 +684,31 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 								break
 							}
 						}
+					}
+				}
+			}
+		}
+
+		// Delete only diagnostic/debug tables that are safe to remove
+		diagnosticDeletes := []string{
+			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
+			"just_unwound", "PoolLimbo",
+		}
+		for _, table := range diagnosticDeletes {
+			if !critical[table] {
+				for _, existingTable := range allTables {
+					if existingTable == table {
+						toDelete = append(toDelete, table)
+						break
 					}
 				}
 			}
 		}
 
 	case PruneLevelModerate:
-		// Moderate: delete more tables but keep block data for node operation
+		// Moderate: delete more data including history, indexes, and use batch-based pruning
+
+		// Delete basic unnecessary tables
 		deleteCategories := []string{"History Data Tables", "Index Tables", "Trie Tables", "Beacon Tables"}
 		for _, category := range deleteCategories {
 			if tables, exists := categories[category]; exists {
@@ -546,18 +725,16 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 			}
 		}
 
-		// Also delete some state data tables
-		additionalDeletes := []string{
-			"HashedStorage", "StateAccounts", "StateStorage", "StateCode", "StateCommitment",
-			"HashedAccount", "HashedCodeHash", "PlainCodeHash", "TEVMCode",
+		// Additional deletes for Moderate mode - to be added carefully after analysis
+		// TODO: Add tables one by one after analyzing their purpose and size
+
+		// Start with diagnostic tables that are obviously safe
+		diagnosticDeletes := []string{
+			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
+			"just_unwound", "PoolLimbo",
 		}
 
-		// Delete non-critical block data tables (方案3)
-		blockDataDeletes := []string{
-			"BlockBody", "Receipt", "TxSender", "TransactionLog",
-			"BlockTransaction", "BlockTransactionLookup",
-		}
-		for _, table := range additionalDeletes {
+		for _, table := range diagnosticDeletes {
 			if !critical[table] {
 				for _, existingTable := range allTables {
 					if existingTable == table {
@@ -567,20 +744,21 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 				}
 			}
 		}
-		for _, table := range blockDataDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
+
+		// Note: Block data tables (BlockBody, Receipt, Header, TransactionLog, etc.) will be handled by batch-based pruning
+		// This allows keeping recent data while removing old data, perfect for sequencer nodes
 
 	}
 
 	return toDelete
+}
+
+func getTableCategoryCount(category string) int {
+	categories := getTableCategories()
+	if tables, exists := categories[category]; exists {
+		return len(tables)
+	}
+	return 0
 }
 
 func getPruneLevelName(level PruneLevel) string {
@@ -772,14 +950,21 @@ func main() {
 	fmt.Printf("\n=== Pruning Level Description ===\n")
 	switch pruneLevel {
 	case PruneLevelConservative:
-		fmt.Printf("Conservative pruning: Only delete obviously unnecessary tables\n")
-		fmt.Printf("Preserves: Block data, transaction data, state data (for debugging and compatibility)\n")
-		fmt.Printf("Deletes: History data, indexes, Trie, Beacon tables\n")
+		fmt.Printf("Conservative pruning: Safe minimal cleanup\n")
+		fmt.Printf("Strategy: Only delete obviously unnecessary tables (Beacon + diagnostic tables)\n")
+		fmt.Printf("Preserves: All block data, transaction data, state data, history data, indexes\n")
+		fmt.Printf("Deletes: Only Beacon tables (%d tables) + diagnostic tables (5 tables)\n",
+			getTableCategoryCount("Beacon Tables"))
+		fmt.Printf("Best for: First-time use, maximum safety, development environments\n")
 	case PruneLevelModerate:
-		fmt.Printf("Moderate pruning: Delete more unnecessary tables but keep essential data\n")
-		fmt.Printf("Preserves: Core state data, sync progress, ZKEVM data, recent batch data\n")
-		fmt.Printf("Deletes: History data, indexes, some state tables, old batch data\n")
-		fmt.Printf("🆕 NEW: Uses batch-based pruning (keeps recent batches, better for zkEVM architecture)\n")
+		fmt.Printf("Moderate pruning: Comprehensive cleanup with batch-based optimization\n")
+		fmt.Printf("Strategy: Delete unnecessary tables + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
+		fmt.Printf("Preserves: Recent batch data, core state data, zkEVM operational tables\n")
+		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Diagnostic (%d), + old batch data\n",
+			getTableCategoryCount("History Data Tables"), getTableCategoryCount("Index Tables"),
+			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"), 5)
+		fmt.Printf("🎯 zkEVM optimized: Balance between space saving and operational capability\n")
+		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	}
 
@@ -826,7 +1011,8 @@ func main() {
 	partiallyPrunedTables := map[string]bool{
 		"Header": true, "BlockBody": true, "Receipt": true,
 		"TxSender": true, "CanonicalHeader": true,
-		"TransactionLog": true, "HeaderNumber": true,
+		"HeaderNumber": true, "TransactionLog": true,
+		// Note: All above tables use batch-based pruning (keep recent batches, delete old data)
 	}
 
 	// Execute table deletion
