@@ -6,7 +6,7 @@ zkevm.l2-chain-id: 1952
 zkevm.l2-sequencer-rpc-url: https://xlayertestrpc.okx.com/terigon
 zkevm.l2-datastreamer-url: teststream.xlayer.tech:8900
 zkevm.l1-chain-id: 11155111
-zkevm.l1-rpc-url: https://sepolia.gateway.tenderly.co/KddSreqToPYLfKbLUCNMv
+zkevm.l1-rpc-url: https://rpc.ankr.com/eth_sepolia/xxxxxxxx
 
 log.console.verbosity: info
 
