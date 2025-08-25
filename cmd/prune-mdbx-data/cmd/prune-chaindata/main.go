@@ -26,9 +26,8 @@ import (
 type PruneLevel int
 
 const (
-	PruneLevelConservative PruneLevel = iota // Conservative pruning
-	PruneLevelModerate                       // Moderate pruning
-	PruneLevelAggressive                     // Aggressive pruning (includes state data cleanup)
+	PruneLevelModerate   PruneLevel = iota // Moderate pruning (recommended)
+	PruneLevelAggressive                   // Aggressive pruning (includes state data cleanup)
 )
 
 // LatestBlockInfo stores essential information of the latest block
@@ -541,10 +540,11 @@ func pruneStorageChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, erro
 func deleteCompositeKeyData(tx kv.RwTx, blockNo uint64) error {
 	// Tables with composite key format: block_number_u64 + hash
 	compositeKeyTables := []string{
-		"Header",                 // block_num_u64 + hash -> header (RLP)
-		"HeadersTotalDifficulty", // block_num_u64 + hash -> td (RLP)
-		"BlockBody",              // block_num_u64 + hash -> block body
-		"TxSender",               // block_num_u64 + blockHash -> sendersList
+		"Header",                            // block_num_u64 + hash -> header (RLP)
+		"HeadersTotalDifficulty",            // block_num_u64 + hash -> td (RLP)
+		"BlockBody",                         // block_num_u64 + hash -> block body
+		"TxSender",                          // block_num_u64 + blockHash -> sendersList
+		"hermez_intermediate_tx_stateRoots", // l2blockno + txhash -> stateRoot
 	}
 
 	blockPrefix := make([]byte, 8)
@@ -653,6 +653,56 @@ func getTableList(db kv.RwDB) ([]string, error) {
 
 	sort.Strings(tables)
 	return tables, nil
+}
+
+// getActiveTableList returns list of tables that actually contain data (size > 0)
+func getActiveTableList(db kv.RwDB) ([]string, error) {
+	ctx := context.Background()
+	tx, err := db.BeginRo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	allTables, err := tx.ListBuckets()
+	if err != nil {
+		return nil, err
+	}
+
+	var activeTables []string
+	for _, tableName := range allTables {
+		// Check if table has any data
+		if hasTableData(tx, tableName) {
+			activeTables = append(activeTables, tableName)
+		}
+	}
+
+	sort.Strings(activeTables)
+	return activeTables, nil
+}
+
+// hasTableData checks if a table contains any data
+func hasTableData(tx kv.Tx, tableName string) bool {
+	// Try to get the first key from the table
+	cursor, err := tx.Cursor(tableName)
+	if err != nil {
+		return false
+	}
+	defer cursor.Close()
+
+	// Check if there's at least one entry
+	k, _, err := cursor.First()
+	return err == nil && len(k) > 0
+}
+
+// contains checks if a slice contains a given string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // getTableStats gets statistics info of table (using default pageSize)
@@ -830,10 +880,11 @@ func getCriticalTables() map[string]bool {
 	critical["MaxTxNum"] = true
 
 	// Critical block data tables (for node operation)
-	// Note: Header can be partially pruned (keep recent batches)
-	// critical["Header"] = true  // Removed - allow batch-based pruning
-	critical["CanonicalHeader"] = true
-	critical["HeaderNumber"] = true
+	// Note: Header-related tables use consistent batch-based pruning strategy
+	// critical["Header"] = true           // Allow batch-based pruning
+	// critical["CanonicalHeader"] = true  // Allow batch-based pruning
+	// critical["HeaderNumber"] = true     // Allow batch-based pruning
+	// All three header tables must use the same strategy to maintain data consistency
 
 	// Critical execution tables (for sequencer operation)
 	critical["LastForkchoice"] = true
@@ -861,41 +912,6 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 	var toDelete []string
 
 	switch level {
-	case PruneLevelConservative:
-		// Conservative: only delete obviously unnecessary tables that are clearly safe
-		// Only delete Beacon tables since zkEVM doesn't use them
-		deleteCategories := []string{"Beacon Tables"}
-		for _, category := range deleteCategories {
-			if tables, exists := categories[category]; exists {
-				for _, table := range tables {
-					if !critical[table] {
-						for _, existingTable := range allTables {
-							if existingTable == table {
-								toDelete = append(toDelete, table)
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Delete only diagnostic/debug tables that are safe to remove
-		diagnosticDeletes := []string{
-			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
-			"just_unwound", "PoolLimbo",
-		}
-		for _, table := range diagnosticDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
-
 	case PruneLevelModerate:
 		// Moderate: delete more data including history, indexes, and use batch-based pruning
 
@@ -904,13 +920,8 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 		for _, category := range deleteCategories {
 			if tables, exists := categories[category]; exists {
 				for _, table := range tables {
-					if !critical[table] {
-						for _, existingTable := range allTables {
-							if existingTable == table {
-								toDelete = append(toDelete, table)
-								break
-							}
-						}
+					if !critical[table] && contains(allTables, table) {
+						toDelete = append(toDelete, table)
 					}
 				}
 			}
@@ -964,13 +975,8 @@ func getPruneTables(allTables []string, level PruneLevel) []string {
 		for _, category := range deleteCategories {
 			if tables, exists := categories[category]; exists {
 				for _, table := range tables {
-					if !critical[table] {
-						for _, existingTable := range allTables {
-							if existingTable == table {
-								toDelete = append(toDelete, table)
-								break
-							}
-						}
+					if !critical[table] && contains(allTables, table) {
+						toDelete = append(toDelete, table)
 					}
 				}
 			}
@@ -1031,14 +1037,12 @@ func getTableCategoryCount(category string) int {
 
 func getPruneLevelName(level PruneLevel) string {
 	switch level {
-	case PruneLevelConservative:
-		return "Conservative"
 	case PruneLevelModerate:
 		return "Moderate"
 	case PruneLevelAggressive:
 		return "Aggressive"
 	default:
-		return "Conservative"
+		return "Moderate"
 	}
 }
 
@@ -1060,16 +1064,14 @@ func main() {
 
 	// Parse arguments
 	dbPath := args[0]
-	pruneLevel := PruneLevelConservative
-	keepRecentBatches := uint64(10) // Default: keep recent 10 batches
-	autoYes := false                // Default: require user confirmation
+	pruneLevel := PruneLevelModerate // Default: moderate (recommended)
+	keepRecentBatches := uint64(10)  // Default: keep recent 10 batches
+	autoYes := false                 // Default: require user confirmation
 
 	// Parse pruning level and optional parameters
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "conservative":
-			pruneLevel = PruneLevelConservative
 		case arg == "moderate":
 			pruneLevel = PruneLevelModerate
 		case arg == "aggressive":
@@ -1109,14 +1111,12 @@ func main() {
 			// If it's not a flag and not the first arg (db path), check if it's a level
 			if i == 1 { // Second argument is level
 				switch arg {
-				case "conservative":
-					pruneLevel = PruneLevelConservative
 				case "moderate":
 					pruneLevel = PruneLevelModerate
 				case "aggressive":
 					pruneLevel = PruneLevelAggressive
 				default:
-					log.Error("Invalid level. Use: conservative, moderate, or aggressive")
+					log.Error("Invalid level. Use: moderate or aggressive")
 					os.Exit(1)
 				}
 			}
@@ -1160,17 +1160,20 @@ func main() {
 
 	log.Info("Chaindata database opened successfully")
 
-	// Get chaindata table list
-	allTables, err := getTableList(chaindb)
+	// Get chaindata table list (only tables with data)
+	allTables, err := getActiveTableList(chaindb)
 	if err != nil {
-		log.Error("Failed to get chaindata table list", "error", err)
+		log.Error("Failed to get active chaindata table list", "error", err)
 		os.Exit(1)
 	}
 
+	log.Info("Active tables found", "count", len(allTables))
+
 	// Analyze tables
 	fmt.Printf("\n=== Database Pruning Analysis ===\n")
-	fmt.Printf("Total tables: %d\n", len(allTables))
+	fmt.Printf("Active tables (with data): %d\n", len(allTables))
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
+	fmt.Printf("Note: Only processing tables that contain data (size > 0)\n")
 
 	// Get SMT tables count
 	smtTableCount := 0
@@ -1223,13 +1226,6 @@ func main() {
 	// Show pruning level description
 	fmt.Printf("\n=== Pruning Level Description ===\n")
 	switch pruneLevel {
-	case PruneLevelConservative:
-		fmt.Printf("Conservative pruning: Safe minimal cleanup\n")
-		fmt.Printf("Strategy: Only delete obviously unnecessary tables (Beacon + diagnostic tables)\n")
-		fmt.Printf("Preserves: All block data, transaction data, state data, history data, indexes\n")
-		fmt.Printf("Deletes: Only Beacon tables (%d tables) + diagnostic tables (5 tables)\n",
-			getTableCategoryCount("Beacon Tables"))
-		fmt.Printf("Best for: First-time use, maximum safety, development environments\n")
 	case PruneLevelModerate:
 		fmt.Printf("Moderate pruning: Comprehensive cleanup with batch-based optimization\n")
 		fmt.Printf("Strategy: Delete unnecessary tables + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
@@ -1304,9 +1300,12 @@ func main() {
 
 	// Filter out block tables from full deletion if we did partial pruning
 	partiallyPrunedTables := map[string]bool{
-		"Header": true, "BlockBody": true, "Receipt": true,
-		"TxSender": true, "CanonicalHeader": true,
-		"HeaderNumber": true, "TransactionLog": true,
+		// Header-related tables (must use same strategy for data consistency)
+		"Header": true, "CanonicalHeader": true, "HeaderNumber": true,
+		// Other block data tables
+		"BlockBody": true, "Receipt": true, "TxSender": true, "TransactionLog": true,
+		// zkEVM intermediate data tables
+		"hermez_intermediate_tx_stateRoots": true,
 		// Note: All above tables use batch-based pruning (keep recent batches, delete old data)
 	}
 
