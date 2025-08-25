@@ -22,21 +22,27 @@ func main() {
 
 	var (
 		sourceDBPath = flag.String("source", "", "Source database path (required)")
-		outputPath   = flag.String("output", "", "Output path for compacted database (required)")
+		outputPath   = flag.String("output", "", "Output path for compacted database (optional if using -in-place)")
 		dbType       = flag.String("type", "chaindata", "Database type: 'chaindata' or 'smt'")
 		dryRun       = flag.Bool("dry-run", false, "Only show space analysis without compacting")
+		inPlace      = flag.Bool("in-place", false, "Compact database in-place (replaces original, requires backup space)")
 	)
 	flag.Parse()
 
-	if *sourceDBPath == "" || *outputPath == "" {
-		fmt.Println("Usage: compact-db -source <source_db_path> -output <output_path> [-type chaindata|smt] [-dry-run]")
+	if *sourceDBPath == "" || (!*inPlace && *outputPath == "") {
+		fmt.Println("Usage: compact-db -source <source_db_path> [-output <output_path>] [-type chaindata|smt] [-dry-run] [-in-place]")
+		fmt.Println("\nModes:")
+		fmt.Println("  1. Copy mode (default): -source <path> -output <new_path>")
+		fmt.Println("  2. In-place mode:       -source <path> -in-place")
 		fmt.Println("\nExamples:")
-		fmt.Println("  # Compact chaindata database")
+		fmt.Println("  # Copy mode - create new compacted database")
 		fmt.Println("  compact-db -source /path/to/seq/chaindata -output /path/to/seq/chaindata.compact")
-		fmt.Println("  # Compact SMT database")
-		fmt.Println("  compact-db -source /path/to/seq/smt -output /path/to/seq/smt.compact -type smt")
+		fmt.Println("  # In-place mode - replace original database (⚠️ requires temporary extra space)")
+		fmt.Println("  compact-db -source /path/to/seq/chaindata -in-place")
+		fmt.Println("  # Compact SMT database in-place")
+		fmt.Println("  compact-db -source /path/to/seq/smt -in-place -type smt")
 		fmt.Println("  # Dry run to analyze potential space savings")
-		fmt.Println("  compact-db -source /path/to/seq/chaindata -output /tmp/compact -dry-run")
+		fmt.Println("  compact-db -source /path/to/seq/chaindata -dry-run")
 		os.Exit(1)
 	}
 
@@ -82,26 +88,41 @@ func main() {
 		return
 	}
 
+	// Determine actual output path (in-place uses temporary directory)
+	var actualOutputPath string
+	var isInPlace bool = *inPlace
+
+	if isInPlace {
+		// Create temporary directory for in-place compaction
+		actualOutputPath = *sourceDBPath + ".compact.tmp"
+		fmt.Printf("\n=== Starting In-Place Database Compaction ===\n")
+		fmt.Printf("⚠️  WARNING: In-place compaction requires temporary extra disk space\n")
+		fmt.Printf("⚠️  Original database will be replaced after successful compaction\n")
+		fmt.Printf("Source Path:         %s\n", *sourceDBPath)
+		fmt.Printf("Temporary Path:      %s\n", actualOutputPath)
+	} else {
+		actualOutputPath = *outputPath
+		fmt.Printf("\n=== Starting Database Compaction ===\n")
+		fmt.Printf("Output Path:         %s\n", actualOutputPath)
+	}
+
 	// Check if output path exists
-	if dir.FileExist(*outputPath) {
-		log.Error("Output path already exists", "path", *outputPath)
+	if dir.FileExist(actualOutputPath) {
+		log.Error("Output path already exists", "path", actualOutputPath)
 		os.Exit(1)
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(*outputPath, 0755); err != nil {
-		log.Error("Failed to create output directory", "path", *outputPath, "error", err)
+	if err := os.MkdirAll(actualOutputPath, 0755); err != nil {
+		log.Error("Failed to create output directory", "path", actualOutputPath, "error", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n=== Starting Database Compaction ===\n")
-	fmt.Printf("Output Path:         %s\n", *outputPath)
 	fmt.Printf("Target Page Size:    Keep original\n")
-
 	startTime := time.Now()
 
 	// Open source and destination databases
-	src, dst := backup.OpenPair(*sourceDBPath, *outputPath, label, 0, log)
+	src, dst := backup.OpenPair(*sourceDBPath, actualOutputPath, label, 0, log)
 	defer src.Close()
 	defer dst.Close()
 
@@ -110,14 +131,14 @@ func main() {
 	if err := backup.Kv2kv(ctx, src, dst, nil, backup.ReadAheadThreads, log); err != nil {
 		log.Error("Database compaction failed", "error", err)
 		// Clean up failed output
-		os.RemoveAll(*outputPath)
+		os.RemoveAll(actualOutputPath)
 		os.Exit(1)
 	}
 
 	duration := time.Since(startTime)
 
 	// Analyze compacted database
-	compactedSize, _, err := analyzeDatabase(*outputPath, label, log)
+	compactedSize, _, err := analyzeDatabase(actualOutputPath, label, log)
 	if err != nil {
 		log.Warn("Failed to analyze compacted database", "error", err)
 		compactedSize = 0
@@ -135,12 +156,53 @@ func main() {
 	}
 	fmt.Printf("Status:              ✅ Success\n")
 
-	fmt.Printf("\n=== Next Steps ===\n")
-	fmt.Printf("1. Stop your Erigon node\n")
-	fmt.Printf("2. Backup original: mv %s %s.backup\n", *sourceDBPath, *sourceDBPath)
-	fmt.Printf("3. Replace with compacted: mv %s %s\n", *outputPath, *sourceDBPath)
-	fmt.Printf("4. Start your Erigon node\n")
-	fmt.Printf("5. If everything works, remove backup: rm -rf %s.backup\n", *sourceDBPath)
+	if isInPlace {
+		// Perform in-place replacement
+		fmt.Printf("\n=== Performing In-Place Replacement ===\n")
+
+		// Close database connections before file operations
+		src.Close()
+		dst.Close()
+
+		// Create backup of original database
+		backupPath := *sourceDBPath + ".backup"
+		fmt.Printf("Creating backup:     %s -> %s\n", *sourceDBPath, backupPath)
+		if err := os.Rename(*sourceDBPath, backupPath); err != nil {
+			log.Error("Failed to backup original database", "error", err)
+			fmt.Printf("❌ Failed to create backup. Keeping compacted database at: %s\n", actualOutputPath)
+			os.Exit(1)
+		}
+
+		// Move compacted database to original location
+		fmt.Printf("Replacing database:  %s -> %s\n", actualOutputPath, *sourceDBPath)
+		if err := os.Rename(actualOutputPath, *sourceDBPath); err != nil {
+			log.Error("Failed to replace database", "error", err)
+			// Try to restore backup
+			fmt.Printf("❌ Failed to replace database. Attempting to restore backup...\n")
+			if restoreErr := os.Rename(backupPath, *sourceDBPath); restoreErr != nil {
+				log.Error("CRITICAL: Failed to restore backup", "restoreError", restoreErr, "originalError", err)
+				fmt.Printf("🚨 CRITICAL: Your database backup is at: %s\n", backupPath)
+				fmt.Printf("🚨 Please manually restore it!\n")
+			} else {
+				fmt.Printf("✅ Backup restored successfully\n")
+			}
+			os.Exit(1)
+		}
+
+		fmt.Printf("✅ In-place compaction completed successfully!\n")
+		fmt.Printf("\n=== Next Steps ===\n")
+		fmt.Printf("1. Your database has been compacted in-place\n")
+		fmt.Printf("2. Start your Erigon node to verify everything works\n")
+		fmt.Printf("3. If everything works, remove backup: rm -rf %s\n", backupPath)
+		fmt.Printf("4. If there are issues, restore backup: mv %s %s\n", backupPath, *sourceDBPath)
+	} else {
+		fmt.Printf("\n=== Next Steps ===\n")
+		fmt.Printf("1. Stop your Erigon node\n")
+		fmt.Printf("2. Backup original: mv %s %s.backup\n", *sourceDBPath, *sourceDBPath)
+		fmt.Printf("3. Replace with compacted: mv %s %s\n", actualOutputPath, *sourceDBPath)
+		fmt.Printf("4. Start your Erigon node\n")
+		fmt.Printf("5. If everything works, remove backup: rm -rf %s.backup\n", *sourceDBPath)
+	}
 }
 
 // analyzeDatabase returns total database size and table data size

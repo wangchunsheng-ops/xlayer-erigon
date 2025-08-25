@@ -28,7 +28,7 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 ### 📦 Database Compaction (`compact-db`)
 - **Freelist space recovery**: Reclaims space from deleted data
 - **Fragmentation elimination**: Reorganizes data for optimal storage
-- **Safe operation**: Creates new database, leaves original untouched
+- **Two operation modes**: Copy mode (safe) or in-place mode (space-efficient)
 - **Dual database support**: Handles both chaindata and SMT databases
 
 ## Quick Start
@@ -46,20 +46,23 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 # Aggressive (maximum, ~62-67GB savings)
 ./prune-tool prune-chaindata /path/to/datadir aggressive --keep-recent-batches=5
 
-# Safe alternative: Database compaction (zero risk, ~5-15GB savings)
-./prune-tool compact-db -source /path/to/datadir/chaindata -output /path/to/datadir/chaindata.compact
+# Safe alternative: Database compaction (zero risk, ~30-35% savings)
+./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
 ```
 
 ### 3. Compact Database (Optional)
 ```bash
-# Analyze compaction potential
-./prune-tool compact-db -source /path/to/datadir/chaindata -output /tmp/test -dry-run
+# Analyze compaction potential (no actual compaction)
+./prune-tool compact-db -source /path/to/datadir/chaindata -dry-run
 
-# Compact chaindata database
+# Method 1: In-place compaction (recommended, requires temporary space)
+./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
+
+# Method 2: Copy mode compaction (creates new database)  
 ./prune-tool compact-db -source /path/to/datadir/chaindata -output /path/to/datadir/chaindata.compact
 
-# Compact SMT database (if separated)
-./prune-tool compact-db -source /path/to/datadir/smt -output /path/to/datadir/smt.compact -type smt
+# Compact SMT database in-place (recommended for large SMT databases)
+./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
 ```
 
 ## Optimal Workflow
