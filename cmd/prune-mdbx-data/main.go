@@ -24,6 +24,8 @@ func main() {
 		runListTables(os.Args[2])
 	case "prune-chaindata":
 		runPruneChaindata(os.Args[2:])
+	case "compact-db":
+		runCompactDB(os.Args[2:])
 	case "help":
 		printUsage()
 	default:
@@ -106,6 +108,41 @@ func runPruneChaindata(args []string) {
 	os.Chdir("../..")
 }
 
+func runCompactDB(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: prune-mdbx-data compact-db -source <source_db_path> -output <output_path> [options]")
+		fmt.Println("Run 'prune-mdbx-data help' for more information")
+		os.Exit(1)
+	}
+
+	// Build and run the compact-db subcommand
+	cmdDir := filepath.Join("cmd", "compact-db")
+	if err := os.Chdir(cmdDir); err != nil {
+		fmt.Printf("Error: failed to change to %s directory: %v\n", cmdDir, err)
+		os.Exit(1)
+	}
+
+	// Build the command
+	buildCmd := exec.Command("go", "build", "-o", "compact-db-tool", "main.go")
+	if err := buildCmd.Run(); err != nil {
+		fmt.Printf("Error: failed to build compact-db: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Run the command with all arguments
+	runCmd := exec.Command("./compact-db-tool", args...)
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+	if err := runCmd.Run(); err != nil {
+		fmt.Printf("Error: failed to run compact-db: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Clean up
+	os.Remove("compact-db-tool")
+	os.Chdir("../..")
+}
+
 func printUsage() {
 	fmt.Println("🗂️  X Layer MDBX Data Pruning Tool")
 	fmt.Println()
@@ -117,6 +154,7 @@ func printUsage() {
 	fmt.Println("COMMANDS:")
 	fmt.Println("  list-tables <db_path>                   📋 List all database tables with sizes and statistics")
 	fmt.Println("  prune-chaindata <db_path> [level] [options]  🧹 Prune unnecessary data from chaindata")
+	fmt.Println("  compact-db -source <src> -output <dst> [options] 📦 Compact database to reclaim freelist space")
 	fmt.Println("  help                                     ❓ Show detailed help information")
 	fmt.Println()
 	fmt.Println("PRUNING LEVELS (prune-chaindata):")
@@ -129,9 +167,15 @@ func printUsage() {
 	fmt.Println("                                             Deletes: History, Index, Trie, Beacon, Diagnostic tables + old batch data")
 	fmt.Println("                                             zkEVM optimized: Balance space saving with operational capability")
 	fmt.Println()
-	fmt.Println("PRUNING OPTIONS (moderate level):")
+	fmt.Println("PRUNING OPTIONS (prune-chaindata moderate level):")
 	fmt.Println("  --keep-recent-batches=N                 🎯 Keep N most recent batches (default: 10)")
 	fmt.Println("  --yes, -y                               ⚡ Auto-confirm, skip interactive confirmation")
+	fmt.Println()
+	fmt.Println("COMPACTION OPTIONS (compact-db):")
+	fmt.Println("  -source <path>                          📂 Source database path (required)")
+	fmt.Println("  -output <path>                          📁 Output path for compacted database (required)")
+	fmt.Println("  -type <chaindata|smt>                   🏷️  Database type (default: chaindata)")
+	fmt.Println("  -dry-run                                👁️  Show analysis without compacting")
 	fmt.Println()
 	fmt.Println("EXAMPLES:")
 	fmt.Println("  # List all database tables")
@@ -146,10 +190,21 @@ func printUsage() {
 	fmt.Println("  # Non-interactive moderate pruning")
 	fmt.Println("  prune-mdbx-data prune-chaindata ./datadir moderate --keep-recent-batches=10 --yes")
 	fmt.Println()
+	fmt.Println("  # Analyze potential space savings (dry run)")
+	fmt.Println("  prune-mdbx-data compact-db -source ./datadir/chaindata -output /tmp/compacted -dry-run")
+	fmt.Println()
+	fmt.Println("  # Compact chaindata database")
+	fmt.Println("  prune-mdbx-data compact-db -source ./datadir/chaindata -output ./datadir/chaindata.compact")
+	fmt.Println()
+	fmt.Println("  # Compact SMT database")
+	fmt.Println("  prune-mdbx-data compact-db -source ./datadir/smt -output ./datadir/smt.compact -type smt")
+	fmt.Println()
 	fmt.Println("SAFETY NOTES:")
-	fmt.Println("  ⚠️  Always backup your data before pruning")
+	fmt.Println("  ⚠️  Always backup your data before pruning or compacting")
+	fmt.Println("  ⚠️  Stop Erigon node before performing database operations")
 	fmt.Println("  ⚠️  Moderate level uses batch-based deletion optimized for zkEVM")
 	fmt.Println("  ⚠️  All zkEVM critical tables are automatically protected")
+	fmt.Println("  ⚠️  Database compaction reclaims freelist space (5-15% typical savings)")
 	fmt.Println("  ⚠️  Use --yes flag carefully in production environments")
 	fmt.Println()
 	fmt.Println("For more information, see: cmd/prune-mdbx-data/README.md")
