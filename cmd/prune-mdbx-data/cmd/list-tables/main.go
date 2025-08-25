@@ -160,7 +160,7 @@ func main() {
 	var smtdb kv.RwDB
 
 	if smtSeparated {
-		smtdb, err = openDatabase(dbSMTDBPath, kv.ChainDB, log) // SMT also uses ChainDB label
+		smtdb, err = openDatabase(dbSMTDBPath, kv.SmtDB, log) // Use proper SMT configuration
 		if err != nil {
 			log.Error("Failed to open SMT database", "error", err)
 		} else {
