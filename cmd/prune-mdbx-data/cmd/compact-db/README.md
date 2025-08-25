@@ -154,6 +154,16 @@ For users who prefer manual control:
 - **Database in use**: Ensure Erigon node is completely stopped
 - **Permissions**: Check read/write access to source and destination
 
+### "resource temporarily unavailable" error
+- **Fixed**: Database connection management improved to prevent MDBX lock conflicts
+- **Cause**: Previously occurred when multiple database connections weren't properly closed
+- **Solution**: Tool now includes proper connection cleanup and timing delays
+
+### Database size display issues
+- **Fixed**: Tool now shows actual disk usage instead of sparse file virtual size
+- **Cause**: MDBX creates sparse files where `ls -lh` shows virtual size (e.g., 8GB) but `du -h` shows real usage (e.g., 24MB)
+- **Solution**: Both `list-tables` and `compact-db` now use syscall to report actual disk usage
+
 ### Low space savings
 - **Normal overhead**: 1-3% is typical for healthy databases
 - **Recent databases**: Have minimal fragmentation

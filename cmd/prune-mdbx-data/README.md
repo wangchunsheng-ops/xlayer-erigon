@@ -15,8 +15,9 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 ### 🔍 Database Analysis (`list-tables`)
 - **Comprehensive table statistics**: size, entries, page count
 - **Database separation detection**: automatically handles chaindata/SMT split
-- **Size discrepancy analysis**: identifies freelist and fragmentation overhead
+- **Size discrepancy analysis**: identifies freelist and fragmentation overhead (shows actual disk usage)
 - **Category-based organization**: groups tables by function
+- **Accurate disk usage**: Reports real disk usage rather than sparse file virtual size
 
 ### 🧹 Data Pruning (`prune-chaindata`) 
 - **Moderate mode (default)**: Comprehensive cleanup with batch retention (~52-57GB savings)  
@@ -238,9 +239,19 @@ mv datadir/chaindata.backup datadir/chaindata
 
 ### Common Issues
 
+**"resource temporarily unavailable" (compact-db)**
+- **Fixed**: Database connection management improved to prevent MDBX lock conflicts
+- **Cause**: Previously occurred when multiple database connections weren't properly closed  
+- **Solution**: Tool now includes proper connection cleanup and timing delays
+
 **"Assertion failed: pgno_align2os_bytes"**
 - Cause: MDBX database geometry mismatch
 - Solution: Fixed in current version with improved database opening logic
+
+**"Database size analysis shows incorrect values"**  
+- **Fixed**: Tools now show actual disk usage instead of sparse file virtual size
+- **Example**: Previously might show 8GB when actual usage is 24MB
+- **Solution**: Both `list-tables` and `compact-db` use syscall to report real disk consumption
 
 **"Database size analysis shows 0 B"**  
 - Cause: Incorrect database label or path

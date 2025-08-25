@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/c2h5oh/datasize"
@@ -261,15 +262,24 @@ func main() {
 	}
 }
 
-// analyzeDatabase returns actual disk size and table data size
+// analyzeDatabase returns actual disk usage and table data size
 func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64, uint64, error) {
-	// Get actual disk file size (not MDBX virtual size)
+	// Get actual disk usage (like `du` command) instead of sparse file logical size
 	dbFile := filepath.Join(dbPath, "mdbx.dat")
 	fileInfo, err := os.Stat(dbFile)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to stat database file: %w", err)
 	}
-	actualFileSize := uint64(fileInfo.Size())
+
+	var actualFileSize uint64
+	// For sparse files, we need to get actual disk usage using syscall
+	if stat, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
+		// stat.Blocks is in 512-byte blocks on most Unix systems
+		actualFileSize = uint64(stat.Blocks * 512)
+	} else {
+		// Fallback to logical size if syscall not available
+		actualFileSize = uint64(fileInfo.Size())
+	}
 
 	// Open database for table analysis
 	db := mdbx2.NewMDBX(logger).Path(dbPath).
@@ -286,7 +296,7 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 	}
 	defer tx.Rollback()
 
-	// Get MDBX virtual size for reference (but don't use for calculations)
+	// Get MDBX transaction for table stats
 	mdbxTx, ok := tx.(*mdbx2.MdbxTx)
 	if !ok {
 		return 0, 0, fmt.Errorf("not MDBX transaction")
@@ -309,6 +319,6 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 		tableSize += totalPages * pageSize
 	}
 
-	// Return actual file size and table data size
+	// Return actual disk usage and table data size
 	return actualFileSize, tableSize, nil
 }

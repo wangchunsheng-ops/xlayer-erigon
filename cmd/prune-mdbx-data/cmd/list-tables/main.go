@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/c2h5oh/datasize"
 	"github.com/ledgerwatch/erigon-lib/kv"
@@ -100,20 +102,24 @@ func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error)
 	return 0, 0, 0, fmt.Errorf("not MDBX transaction")
 }
 
-// getDatabaseSize gets the actual database size on disk (including metadata, freelist, etc.)
-func getDatabaseSize(db kv.RwDB) (uint64, error) {
-	ctx := context.Background()
-	tx, err := db.BeginRo(ctx)
+// getDatabaseSize gets the actual database disk usage (like `du` command)
+func getDatabaseSize(dbPath string) (uint64, error) {
+	// Get actual disk usage instead of sparse file logical size
+	dbFile := filepath.Join(dbPath, "mdbx.dat")
+	fileInfo, err := os.Stat(dbFile)
 	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	if mdbxTx, ok := tx.(*mdbxpkg.MdbxTx); ok {
-		return mdbxTx.DBSize()
+		return 0, fmt.Errorf("failed to stat database file %s: %w", dbFile, err)
 	}
 
-	return 0, fmt.Errorf("not MDBX transaction")
+	// For sparse files, we need to get actual disk usage using syscall
+	if stat, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
+		// stat.Blocks is in 512-byte blocks on most Unix systems
+		actualSize := stat.Blocks * 512
+		return uint64(actualSize), nil
+	}
+
+	// Fallback to logical size if syscall not available
+	return uint64(fileInfo.Size()), nil
 }
 
 // abs returns the absolute value of x
@@ -396,7 +402,7 @@ func main() {
 	}
 
 	// Get actual database size for chaindata
-	chainActualSize, err := getDatabaseSize(chaindb)
+	chainActualSize, err := getDatabaseSize(dbMainDBPath)
 	if err != nil {
 		fmt.Printf("Failed to get chaindata database size: %v\n", err)
 	} else {
@@ -424,7 +430,7 @@ func main() {
 			}
 		}
 
-		smtActualSize, err := getDatabaseSize(smtdb)
+		smtActualSize, err := getDatabaseSize(dbSMTDBPath)
 		if err != nil {
 			fmt.Printf("Failed to get SMT database size: %v\n", err)
 		} else {
