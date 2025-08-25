@@ -445,7 +445,11 @@ func main() {
 
 	// Summary
 	fmt.Printf("\n=== Summary ===\n")
-	fmt.Printf("Database separation status: %s\n", map[bool]string{true: "Separated", false: "Unified"}[smtSeparated])
+	if smtSeparated {
+		fmt.Printf("Database separation: SEPARATED (chaindata + smt databases)\n")
+	} else {
+		fmt.Printf("Database separation: UNIFIED (single database contains all data)\n")
+	}
 	fmt.Printf("Chaindata database has %d tables\n", len(chainTables))
 	if smtSeparated {
 		fmt.Printf("SMT database has %d tables\n", len(smtTables))
