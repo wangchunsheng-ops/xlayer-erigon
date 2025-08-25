@@ -23,29 +23,63 @@ The `compact-db` tool is designed to reclaim space from MDBX database freelist a
 - Difference is <2% of total size
 - Very active databases (fragmentation will return quickly)
 
-## Usage Examples
+## Operation Modes
 
-### 1. Analyze Potential Savings (Dry Run)
+### 📊 Analysis Mode (Dry Run)
+Analyze potential space savings without performing actual compaction:
 ```bash
-prune-mdbx-data compact-db -source ./seq/chaindata -output /tmp/test -dry-run
+# No output path needed for analysis
+prune-mdbx-data compact-db -source ./seq/chaindata -dry-run
+prune-mdbx-data compact-db -source ./seq/smt -dry-run -type smt
 ```
 
-### 2. Compact Chaindata Database
+### 📁 Copy Mode (Default)
+Creates a new compacted database while preserving the original:
 ```bash
+# Chaindata compaction
 prune-mdbx-data compact-db -source ./seq/chaindata -output ./seq/chaindata.compact
-```
 
-### 3. Compact SMT Database  
-```bash
+# SMT database compaction  
 prune-mdbx-data compact-db -source ./seq/smt -output ./seq/smt.compact -type smt
 ```
 
+### 🔄 In-Place Mode (Recommended)
+Compacts database and automatically replaces the original:
+```bash
+# Chaindata in-place compaction (saves disk space)
+prune-mdbx-data compact-db -source ./seq/chaindata -in-place
+
+# SMT in-place compaction
+prune-mdbx-data compact-db -source ./seq/smt -in-place -type smt
+```
 
 
-## Safety Procedure
+
+## Safety Procedures
+
+### 🔄 In-Place Mode (Automated)
+The tool handles backup and replacement automatically:
 
 1. **Stop Erigon node** completely
-2. **Backup original database**:
+2. **Run in-place compaction**:
+   ```bash
+   prune-mdbx-data compact-db -source ./seq/chaindata -in-place
+   ```
+3. **Tool automatically**:
+   - Creates backup (`database.backup`)
+   - Compacts to temporary location
+   - Replaces original atomically
+4. **Start Erigon node** and verify operation
+5. **Clean up backup** (after verification):
+   ```bash
+   rm -rf ./seq/chaindata.backup
+   ```
+
+### 📁 Copy Mode (Manual)
+For users who prefer manual control:
+
+1. **Stop Erigon node** completely
+2. **Create backup**:
    ```bash
    cp -r ./seq/chaindata ./seq/chaindata.backup
    ```
@@ -58,8 +92,8 @@ prune-mdbx-data compact-db -source ./seq/smt -output ./seq/smt.compact -type smt
    mv ./seq/chaindata ./seq/chaindata.old
    mv ./seq/chaindata.compact ./seq/chaindata
    ```
-5. **Test startup** - start Erigon node and verify operation
-6. **Clean up** (after verification):
+5. **Test startup** and verify operation
+6. **Clean up**:
    ```bash
    rm -rf ./seq/chaindata.old ./seq/chaindata.backup
    ```
@@ -75,30 +109,53 @@ prune-mdbx-data compact-db -source ./seq/smt -output ./seq/smt.compact -type smt
 
 ## Technical Details
 
+### Copy Mode
 - **Process**: Creates new database and copies data table by table
+- **Space**: Requires ~2x database size (original + compacted)
+- **Safety**: Original database remains untouched
+- **Manual**: Requires manual backup and replacement
+
+### In-Place Mode  
+- **Process**: Creates temporary compacted copy, then atomically replaces original
+- **Space**: Requires ~1x database size temporarily (automatic cleanup)
+- **Safety**: Automatic backup created (`database.backup`)
+- **Automated**: Handles backup, replacement, and cleanup automatically
+
+### Common Characteristics
 - **Result**: Eliminates freelist and optimizes page layout  
 - **Duration**: ~10-30 minutes per 100GB depending on hardware
-- **Space**: Requires free space equal to database size during operation
-- **Atomicity**: Original database remains untouched until manual replacement
+- **Path Support**: Supports both relative and absolute paths
+- **Dry Run**: Analysis mode requires no additional disk space
 
 
 
 ## Troubleshooting
 
 ### "Source database not found"
-- Verify path includes `mdbx.dat` file
-- Check database type (-type chaindata vs smt)
+- **Relative paths**: Use `seq/chaindata` not `seq`
+- **Verify file**: Ensure `mdbx.dat` exists in source directory
+- **Database type**: Check `-type chaindata` vs `-type smt`
+- **Working directory**: Tool auto-handles relative paths from main directory
 
 ### "Output path already exists"  
-- Tool won't overwrite existing directories
-- Remove or rename existing output path
+- **Copy mode**: Tool won't overwrite existing directories
+- **Solution**: Remove or rename existing output path
+- **In-place mode**: Not applicable (uses temporary paths)
+
+### Parameter errors
+- **Dry run**: Use `-source path -dry-run` (no output path needed)
+- **In-place**: Use `-source path -in-place` (no output path needed)  
+- **Copy mode**: Requires both `-source path -output newpath`
 
 ### "Database compaction failed"
-- Check available disk space (needs ~2x database size)
-- Ensure source database is not in use
-- Check file permissions
+- **Disk space**: 
+  - Copy mode: needs ~2x database size
+  - In-place mode: needs ~1x database size temporarily
+- **Database in use**: Ensure Erigon node is completely stopped
+- **Permissions**: Check read/write access to source and destination
 
 ### Low space savings
-- Some overhead is normal (~1-3%)
-- Recent databases have less fragmentation
-- Consider if compaction is worth the effort
+- **Normal overhead**: 1-3% is typical for healthy databases
+- **Recent databases**: Have minimal fragmentation
+- **Cost-benefit**: Consider if compaction effort is worthwhile
+- **Analysis first**: Always run `-dry-run` to check potential savings

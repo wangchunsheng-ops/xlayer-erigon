@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/c2h5oh/datasize"
-	"github.com/ledgerwatch/erigon-lib/common/dir"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/backup"
 	mdbx2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
@@ -29,7 +29,7 @@ func main() {
 	)
 	flag.Parse()
 
-	if *sourceDBPath == "" || (!*inPlace && *outputPath == "") {
+	if *sourceDBPath == "" || (!*inPlace && *outputPath == "" && !*dryRun) {
 		fmt.Println("Usage: compact-db -source <source_db_path> [-output <output_path>] [-type chaindata|smt] [-dry-run] [-in-place]")
 		fmt.Println("\nModes:")
 		fmt.Println("  1. Copy mode (default): -source <path> -output <new_path>")
@@ -58,9 +58,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Handle relative paths: if source path is relative, make it absolute from the correct base
+	if !filepath.IsAbs(*sourceDBPath) {
+		// When called from main program, we need to resolve relative paths correctly
+		if cwd, err := os.Getwd(); err == nil {
+			// If we're in a subdirectory (like cmd/compact-db), go up to main directory
+			if strings.Contains(cwd, "cmd/compact-db") {
+				basePath := filepath.Dir(filepath.Dir(cwd)) // Go up two levels
+				*sourceDBPath = filepath.Join(basePath, *sourceDBPath)
+			}
+		}
+	}
+
+	// Also handle output path if it's relative (copy mode only)
+	if !*inPlace && *outputPath != "" && !filepath.IsAbs(*outputPath) {
+		if cwd, err := os.Getwd(); err == nil {
+			if strings.Contains(cwd, "cmd/compact-db") {
+				basePath := filepath.Dir(filepath.Dir(cwd)) // Go up two levels
+				*outputPath = filepath.Join(basePath, *outputPath)
+			}
+		}
+	}
+
 	// Check source database exists
-	if !dir.FileExist(filepath.Join(*sourceDBPath, "mdbx.dat")) {
-		log.Error("Source database not found", "path", *sourceDBPath)
+	dbFile := filepath.Join(*sourceDBPath, "mdbx.dat")
+	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+		log.Error("Source database not found", "path", *sourceDBPath, "file", dbFile)
 		os.Exit(1)
 	}
 
@@ -88,6 +111,10 @@ func main() {
 		return
 	}
 
+	// Give MDBX time to fully release file locks before opening for compaction
+	fmt.Printf("Waiting for database file lock release...\n")
+	time.Sleep(2 * time.Second)
+
 	// Determine actual output path (in-place uses temporary directory)
 	var actualOutputPath string
 	var isInPlace bool = *inPlace
@@ -106,10 +133,19 @@ func main() {
 		fmt.Printf("Output Path:         %s\n", actualOutputPath)
 	}
 
-	// Check if output path exists
-	if dir.FileExist(actualOutputPath) {
-		log.Error("Output path already exists", "path", actualOutputPath)
-		os.Exit(1)
+	// Check if output path exists (use os.Stat instead of dir.FileExist for better relative path support)
+	if _, err := os.Stat(actualOutputPath); !os.IsNotExist(err) {
+		if isInPlace {
+			// For in-place mode, automatically clean up stale temporary directories
+			fmt.Printf("Cleaning up existing temporary directory: %s\n", actualOutputPath)
+			if err := os.RemoveAll(actualOutputPath); err != nil {
+				log.Error("Failed to clean up existing temporary directory", "path", actualOutputPath, "error", err)
+				os.Exit(1)
+			}
+		} else {
+			log.Error("Output path already exists", "path", actualOutputPath)
+			os.Exit(1)
+		}
 	}
 
 	// Create output directory
@@ -121,14 +157,32 @@ func main() {
 	fmt.Printf("Target Page Size:    Keep original\n")
 	startTime := time.Now()
 
-	// Open source and destination databases
+	// Additional safety check: verify source database is not locked
+	fmt.Printf("Verifying database accessibility...\n")
+	testDB := mdbx2.NewMDBX(log).Path(*sourceDBPath).
+		Label(label).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		Readonly().
+		MustOpen()
+	testDB.Close()
+
+	// Brief pause to ensure test connection is fully closed
+	time.Sleep(200 * time.Millisecond)
+
+	fmt.Printf("Opening source and destination databases...\n")
+	// Open source and destination databases (use 0 for automatic page size detection)
 	src, dst := backup.OpenPair(*sourceDBPath, actualOutputPath, label, 0, log)
-	defer src.Close()
-	defer dst.Close()
+	fmt.Printf("Database connections established successfully.\n")
 
 	// Perform the compaction
 	ctx := context.Background()
-	if err := backup.Kv2kv(ctx, src, dst, nil, backup.ReadAheadThreads, log); err != nil {
+	err = backup.Kv2kv(ctx, src, dst, nil, backup.ReadAheadThreads, log)
+
+	// Explicitly close connections before further operations
+	src.Close()
+	dst.Close()
+
+	if err != nil {
 		log.Error("Database compaction failed", "error", err)
 		// Clean up failed output
 		os.RemoveAll(actualOutputPath)
@@ -136,6 +190,10 @@ func main() {
 	}
 
 	duration := time.Since(startTime)
+
+	// Give MDBX time to fully release file locks before analyzing compacted database
+	fmt.Printf("Finalizing compaction...\n")
+	time.Sleep(500 * time.Millisecond)
 
 	// Analyze compacted database
 	compactedSize, _, err := analyzeDatabase(actualOutputPath, label, log)
@@ -160,9 +218,7 @@ func main() {
 		// Perform in-place replacement
 		fmt.Printf("\n=== Performing In-Place Replacement ===\n")
 
-		// Close database connections before file operations
-		src.Close()
-		dst.Close()
+		// Database connections already closed above
 
 		// Create backup of original database
 		backupPath := *sourceDBPath + ".backup"
@@ -223,31 +279,32 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 	defer tx.Rollback()
 
 	// Get actual database size
-	if mdbxTx, ok := tx.(*mdbx2.MdbxTx); ok {
-		totalSize, err := mdbxTx.DBSize()
-		if err != nil {
-			return 0, 0, err
-		}
-
-		// Calculate table data size
-		var tableSize uint64
-		tables, err := tx.ListBuckets()
-		if err != nil {
-			return 0, 0, err
-		}
-
-		pageSize := db.PageSize()
-		for _, tableName := range tables {
-			stat, err := mdbxTx.BucketStat(tableName)
-			if err != nil {
-				continue // Skip failed tables
-			}
-			totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
-			tableSize += totalPages * pageSize
-		}
-
-		return totalSize, tableSize, nil
+	mdbxTx, ok := tx.(*mdbx2.MdbxTx)
+	if !ok {
+		return 0, 0, fmt.Errorf("not MDBX transaction")
 	}
 
-	return 0, 0, fmt.Errorf("not MDBX transaction")
+	totalSize, err := mdbxTx.DBSize()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Calculate table data size
+	tables, err := tx.ListBuckets()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var tableSize uint64
+	pageSize := db.PageSize()
+	for _, tableName := range tables {
+		stat, err := mdbxTx.BucketStat(tableName)
+		if err != nil {
+			continue // Skip failed tables
+		}
+		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
+		tableSize += totalPages * pageSize
+	}
+
+	return totalSize, tableSize, nil
 }

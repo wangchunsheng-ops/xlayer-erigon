@@ -110,7 +110,7 @@ func runPruneChaindata(args []string) {
 
 func runCompactDB(args []string) {
 	if len(args) < 2 {
-		fmt.Println("Usage: prune-mdbx-data compact-db -source <source_db_path> -output <output_path> [options]")
+		fmt.Println("Usage: prune-mdbx-data compact-db -source <source_db_path> [-output <output_path>] [-in-place] [options]")
 		fmt.Println("Run 'prune-mdbx-data help' for more information")
 		os.Exit(1)
 	}
@@ -154,7 +154,7 @@ func printUsage() {
 	fmt.Println("COMMANDS:")
 	fmt.Println("  list-tables <db_path>                   📋 List all database tables with sizes and statistics")
 	fmt.Println("  prune-chaindata <db_path> [level] [options]  🧹 Prune unnecessary data from chaindata")
-	fmt.Println("  compact-db -source <src> -output <dst> [options] 📦 Compact database to reclaim freelist space")
+	fmt.Println("  compact-db -source <src> [-output <dst>] [-in-place] [options] 📦 Compact database to reclaim freelist space")
 	fmt.Println("  help                                     ❓ Show detailed help information")
 	fmt.Println()
 	fmt.Println("PRUNING LEVELS (prune-chaindata):")

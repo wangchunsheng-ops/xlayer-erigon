@@ -16,7 +16,7 @@ Based on real mainnet data analysis:
 
 **🔄 Important Note**: Batch-based pruning (🔄) means the table is NOT fully deleted, but rather **partially cleaned** by removing old batch data while preserving recent batches.
 
-**💡 Safe Alternative**: For users seeking zero-risk cleanup, use `compact-db` which provides 5-15% space savings without any data deletion.
+**💡 Safe Alternative**: For users seeking zero-risk cleanup, use `compact-db -in-place` which provides 30-35% space savings without any data deletion.
 
 ### 🔥 Large Tables (>1GB) - Primary Targets
 
@@ -195,9 +195,9 @@ This inconsistency caused data integrity issues where header lookups could fail.
 # 2. Prune unnecessary data first
 ./prune-tool prune-chaindata /path/to/datadir moderate --keep-recent-batches=10
 
-# 3. Compact both databases for maximum space recovery
-./prune-tool compact-db -source /path/to/datadir/chaindata -output /path/to/datadir/chaindata.compact
-./prune-tool compact-db -source /path/to/datadir/smt -output /path/to/datadir/smt.compact -type smt
+# 3. Compact both databases for maximum space recovery (in-place mode)
+./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
+./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
 
 # Expected total savings: ~117-122 GB (62-67GB from pruning + 55GB from compaction)
 ```

@@ -67,7 +67,7 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 
 ## Optimal Workflow
 
-### For Maximum Space Savings
+### For Maximum Space Savings (Recommended)
 ```bash
 # Step 1: Analyze current state
 ./prune-tool list-tables /path/to/datadir > before.txt
@@ -75,14 +75,33 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 # Step 2: Prune unnecessary data first
 ./prune-tool prune-chaindata /path/to/datadir moderate --keep-recent-batches=10
 
-# Step 3: Compact to reclaim freelist space
+# Step 3: Compact databases in-place (automated replacement)
+./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
+./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
+
+# Step 4: Verify results
+./prune-tool list-tables /path/to/datadir > after.txt
+
+# Step 5: Clean up automatic backups (after verification)
+rm -rf /path/to/datadir/chaindata.backup /path/to/datadir/smt.backup
+```
+
+### Alternative: Manual Control Workflow
+```bash
+# For users who prefer step-by-step manual control
+./prune-tool list-tables /path/to/datadir > before.txt
+./prune-tool prune-chaindata /path/to/datadir moderate --keep-recent-batches=10
+
+# Analyze compaction potential first
+./prune-tool compact-db -source /path/to/datadir/chaindata -dry-run
+
+# Manual compaction with copy mode
 ./prune-tool compact-db -source /path/to/datadir/chaindata -output /path/to/datadir/chaindata.compact
 
-# Step 4: Replace original with compacted
+# Manual replacement
 mv /path/to/datadir/chaindata /path/to/datadir/chaindata.backup
 mv /path/to/datadir/chaindata.compact /path/to/datadir/chaindata
 
-# Step 5: Verify results
 ./prune-tool list-tables /path/to/datadir > after.txt
 ```
 
@@ -125,24 +144,33 @@ Analyzes database structure and provides detailed statistics.
 ./prune-tool prune-chaindata ./datadir aggressive --keep-recent-batches=3 --yes
 ```
 
-### `compact-db -source <src> -output <dst> [options]`
+### `compact-db -source <src> [-output <dst>] [-in-place] [options]`
+
+**Operation Modes:**
+- **Analysis**: `-source <path> -dry-run` (no output needed)
+- **Copy**: `-source <path> -output <newpath>` (creates new database)
+- **In-place**: `-source <path> -in-place` (replaces original)
 
 **Options:**
 - `-source <path>`: Source database path (required)
-- `-output <path>`: Output path for compacted database (required)  
+- `-output <path>`: Output path (required for copy mode only)
+- `-in-place`: Compact and replace original database  
 - `-type <chaindata|smt>`: Database type (default: chaindata)
 - `-dry-run`: Show analysis without performing compaction
 
 **Examples:**
 ```bash
-# Analyze potential savings
-./prune-tool compact-db -source ./datadir/chaindata -output /tmp/test -dry-run
+# Analyze potential savings (recommended first step)
+./prune-tool compact-db -source ./datadir/chaindata -dry-run
 
-# Compact chaindata
+# In-place compaction (recommended, saves disk space)
+./prune-tool compact-db -source ./datadir/chaindata -in-place
+
+# Copy mode compaction (if you prefer manual control)
 ./prune-tool compact-db -source ./datadir/chaindata -output ./datadir/chaindata.compact
 
-# Compact SMT database  
-./prune-tool compact-db -source ./datadir/smt -output ./datadir/smt.compact -type smt
+# SMT database in-place compaction
+./prune-tool compact-db -source ./datadir/smt -in-place -type smt
 ```
 
 ## Expected Space Savings

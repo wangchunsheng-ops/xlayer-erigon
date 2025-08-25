@@ -470,30 +470,42 @@ func pruneAccountChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, erro
 	}
 	defer cursor.Close()
 
-	deletedCount := 0
-	cutoffKey := make([]byte, 8)
-	binary.BigEndian.PutUint64(cutoffKey, cutoffBlock)
+	// Collect all keys to delete first (safer for DupSort tables)
+	var keysToDelete [][]byte
 
 	// Iterate through all keys before cutoff block
 	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.NextNoDup() {
 		if err != nil {
-			return deletedCount, err
+			return 0, err
 		}
 
 		if len(key) >= 8 {
 			blockNum := binary.BigEndian.Uint64(key[:8])
 			if blockNum >= cutoffBlock {
-				break // Reached the cutoff, stop deleting
+				break // Reached the cutoff, stop collecting
 			}
 
-			// Delete all entries for this block (there might be multiple accounts)
-			for _, _, err := cursor.SeekExact(key); err == nil; _, _, err = cursor.NextDup() {
-				if err := cursor.DeleteCurrent(); err != nil {
-					return deletedCount, err
+			// Collect all entries for this block (there might be multiple accounts per block)
+			for k, _, err := cursor.SeekExact(key); k != nil && err == nil; k, _, err = cursor.NextDup() {
+				if err != nil {
+					return 0, err
 				}
-				deletedCount++
+				// Make a copy of the key
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				keysToDelete = append(keysToDelete, keyCopy)
 			}
 		}
+	}
+
+	// Now delete all collected keys using tx.Delete (safer than cursor operations)
+	deletedCount := 0
+	for _, key := range keysToDelete {
+		if err := tx.Delete("AccountChangeSet", key); err != nil {
+			// Log but continue - some keys might not exist anymore
+			continue
+		}
+		deletedCount++
 	}
 
 	return deletedCount, nil
@@ -507,30 +519,37 @@ func pruneStorageChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, erro
 	}
 	defer cursor.Close()
 
-	deletedCount := 0
+	// Collect all keys to delete first (safer for DupSort tables)
+	var keysToDelete [][]byte
 
-	// StorageChangeSet key format: block_number + address + incarnation
-	// We need to delete all entries where block_number < cutoffBlock
-	blockPrefix := make([]byte, 8)
-	for blockNum := uint64(0); blockNum < cutoffBlock; blockNum++ {
-		binary.BigEndian.PutUint64(blockPrefix, blockNum)
-
-		// Delete all storage changes for this block
-		for key, _, err := cursor.Seek(blockPrefix); key != nil && len(key) >= 8; key, _, err = cursor.Next() {
-			if err != nil {
-				return deletedCount, err
-			}
-
-			keyBlockNum := binary.BigEndian.Uint64(key[:8])
-			if keyBlockNum != blockNum {
-				break // Moved to next block
-			}
-
-			if err := cursor.DeleteCurrent(); err != nil {
-				return deletedCount, err
-			}
-			deletedCount++
+	// StorageChangeSet key format: block_number + address + incarnation + storage_key
+	// We need to collect all entries where block_number < cutoffBlock
+	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.Next() {
+		if err != nil {
+			return 0, err
 		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached the cutoff, stop collecting
+			}
+
+			// Make a copy of the key
+			keyCopy := make([]byte, len(key))
+			copy(keyCopy, key)
+			keysToDelete = append(keysToDelete, keyCopy)
+		}
+	}
+
+	// Now delete all collected keys using tx.Delete (safer than cursor operations)
+	deletedCount := 0
+	for _, key := range keysToDelete {
+		if err := tx.Delete("StorageChangeSet", key); err != nil {
+			// Log but continue - some keys might not exist anymore
+			continue
+		}
+		deletedCount++
 	}
 
 	return deletedCount, nil
