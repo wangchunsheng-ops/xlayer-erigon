@@ -100,7 +100,7 @@ func main() {
 	fmt.Printf("\n=== Database Analysis ===\n")
 	fmt.Printf("Database Type:       %s\n", *dbType)
 	fmt.Printf("Source Path:         %s\n", *sourceDBPath)
-	fmt.Printf("Original Size:       %s\n", datasize.ByteSize(originalSize).HumanReadable())
+	fmt.Printf("Actual Disk Size:    %s\n", datasize.ByteSize(originalSize).HumanReadable())
 	fmt.Printf("Table Data Size:     %s\n", datasize.ByteSize(tableSize).HumanReadable())
 	fmt.Printf("Overhead/Freelist:   %s (%.1f%%)\n", datasize.ByteSize(difference).HumanReadable(), differencePercent)
 
@@ -170,7 +170,7 @@ func main() {
 	time.Sleep(200 * time.Millisecond)
 
 	fmt.Printf("Opening source and destination databases...\n")
-	// Open source and destination databases (use 0 for automatic page size detection)
+	// Use standard backup.OpenPair (safe, maintains compatibility)
 	src, dst := backup.OpenPair(*sourceDBPath, actualOutputPath, label, 0, log)
 	fmt.Printf("Database connections established successfully.\n")
 
@@ -207,9 +207,9 @@ func main() {
 
 	fmt.Printf("\n=== Compaction Results ===\n")
 	fmt.Printf("Duration:            %v\n", duration)
-	fmt.Printf("Original Size:       %s\n", datasize.ByteSize(originalSize).HumanReadable())
+	fmt.Printf("Original Disk Size:  %s\n", datasize.ByteSize(originalSize).HumanReadable())
 	if compactedSize > 0 {
-		fmt.Printf("Compacted Size:      %s\n", datasize.ByteSize(compactedSize).HumanReadable())
+		fmt.Printf("Compacted Disk Size: %s\n", datasize.ByteSize(compactedSize).HumanReadable())
 		fmt.Printf("Space Saved:         %s (%.1f%%)\n", datasize.ByteSize(spaceSaved).HumanReadable(), spaceSavedPercent)
 	}
 	fmt.Printf("Status:              ✅ Success\n")
@@ -261,9 +261,17 @@ func main() {
 	}
 }
 
-// analyzeDatabase returns total database size and table data size
+// analyzeDatabase returns actual disk size and table data size
 func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64, uint64, error) {
-	// Open database for analysis
+	// Get actual disk file size (not MDBX virtual size)
+	dbFile := filepath.Join(dbPath, "mdbx.dat")
+	fileInfo, err := os.Stat(dbFile)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to stat database file: %w", err)
+	}
+	actualFileSize := uint64(fileInfo.Size())
+
+	// Open database for table analysis
 	db := mdbx2.NewMDBX(logger).Path(dbPath).
 		Label(label).
 		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
@@ -278,15 +286,10 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 	}
 	defer tx.Rollback()
 
-	// Get actual database size
+	// Get MDBX virtual size for reference (but don't use for calculations)
 	mdbxTx, ok := tx.(*mdbx2.MdbxTx)
 	if !ok {
 		return 0, 0, fmt.Errorf("not MDBX transaction")
-	}
-
-	totalSize, err := mdbxTx.DBSize()
-	if err != nil {
-		return 0, 0, err
 	}
 
 	// Calculate table data size
@@ -306,5 +309,6 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 		tableSize += totalPages * pageSize
 	}
 
-	return totalSize, tableSize, nil
+	// Return actual file size and table data size
+	return actualFileSize, tableSize, nil
 }
