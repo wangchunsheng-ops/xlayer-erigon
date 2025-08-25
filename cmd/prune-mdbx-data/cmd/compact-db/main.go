@@ -26,20 +26,26 @@ func main() {
 		outputPath   = flag.String("output", "", "Output path for compacted database (optional if using -in-place)")
 		dbType       = flag.String("type", "chaindata", "Database type: 'chaindata' or 'smt'")
 		dryRun       = flag.Bool("dry-run", false, "Only show space analysis without compacting")
-		inPlace      = flag.Bool("in-place", false, "Compact database in-place (replaces original, requires backup space)")
+		inPlace      = flag.Bool("in-place", false, "Compact database in-place (replaces original)")
+		createBackup = flag.Bool("backup", false, "Create backup before in-place replacement (default: false)")
 	)
 	flag.Parse()
 
 	if *sourceDBPath == "" || (!*inPlace && *outputPath == "" && !*dryRun) {
-		fmt.Println("Usage: compact-db -source <source_db_path> [-output <output_path>] [-type chaindata|smt] [-dry-run] [-in-place]")
+		fmt.Println("Usage: compact-db -source <source_db_path> [-output <output_path>] [-type chaindata|smt] [-dry-run] [-in-place] [-backup]")
 		fmt.Println("\nModes:")
 		fmt.Println("  1. Copy mode (default): -source <path> -output <new_path>")
-		fmt.Println("  2. In-place mode:       -source <path> -in-place")
+		fmt.Println("  2. In-place mode:       -source <path> -in-place [-backup]")
+		fmt.Println("\nOptions:")
+		fmt.Println("  -backup:  Create .backup before in-place replacement (default: false)")
+		fmt.Println("  -dry-run: Analyze potential space savings only")
 		fmt.Println("\nExamples:")
 		fmt.Println("  # Copy mode - create new compacted database")
 		fmt.Println("  compact-db -source /path/to/seq/chaindata -output /path/to/seq/chaindata.compact")
-		fmt.Println("  # In-place mode - replace original database (⚠️ requires temporary extra space)")
+		fmt.Println("  # In-place mode - replace original database directly (⚠️ no backup)")
 		fmt.Println("  compact-db -source /path/to/seq/chaindata -in-place")
+		fmt.Println("  # In-place mode with backup - safer but uses more space")
+		fmt.Println("  compact-db -source /path/to/seq/chaindata -in-place -backup")
 		fmt.Println("  # Compact SMT database in-place")
 		fmt.Println("  compact-db -source /path/to/seq/smt -in-place -type smt")
 		fmt.Println("  # Dry run to analyze potential space savings")
@@ -221,27 +227,57 @@ func main() {
 
 		// Database connections already closed above
 
-		// Create backup of original database
-		backupPath := *sourceDBPath + ".backup"
-		fmt.Printf("Creating backup:     %s -> %s\n", *sourceDBPath, backupPath)
-		if err := os.Rename(*sourceDBPath, backupPath); err != nil {
-			log.Error("Failed to backup original database", "error", err)
-			fmt.Printf("❌ Failed to create backup. Keeping compacted database at: %s\n", actualOutputPath)
-			os.Exit(1)
+		var backupPath string
+		if *createBackup {
+			// Create backup of original database
+			backupPath = *sourceDBPath + ".backup"
+			fmt.Printf("Creating backup:     %s -> %s\n", *sourceDBPath, backupPath)
+
+			// Remove existing backup if it exists
+			if _, err := os.Stat(backupPath); err == nil {
+				fmt.Printf("Removing existing backup: %s\n", backupPath)
+				if err := os.RemoveAll(backupPath); err != nil {
+					log.Error("Failed to remove existing backup", "error", err)
+					fmt.Printf("❌ Failed to remove existing backup. Keeping compacted database at: %s\n", actualOutputPath)
+					os.Exit(1)
+				}
+			}
+
+			if err := os.Rename(*sourceDBPath, backupPath); err != nil {
+				log.Error("Failed to backup original database", "error", err)
+				fmt.Printf("❌ Failed to create backup. Keeping compacted database at: %s\n", actualOutputPath)
+				os.Exit(1)
+			}
+		} else {
+			// No backup mode - directly remove original
+			fmt.Printf("⚠️  No backup mode: directly replacing original database\n")
+			fmt.Printf("Removing original:   %s\n", *sourceDBPath)
+			if err := os.RemoveAll(*sourceDBPath); err != nil {
+				log.Error("Failed to remove original database", "error", err)
+				fmt.Printf("❌ Failed to remove original database. Keeping compacted database at: %s\n", actualOutputPath)
+				os.Exit(1)
+			}
 		}
 
 		// Move compacted database to original location
 		fmt.Printf("Replacing database:  %s -> %s\n", actualOutputPath, *sourceDBPath)
 		if err := os.Rename(actualOutputPath, *sourceDBPath); err != nil {
 			log.Error("Failed to replace database", "error", err)
-			// Try to restore backup
-			fmt.Printf("❌ Failed to replace database. Attempting to restore backup...\n")
-			if restoreErr := os.Rename(backupPath, *sourceDBPath); restoreErr != nil {
-				log.Error("CRITICAL: Failed to restore backup", "restoreError", restoreErr, "originalError", err)
-				fmt.Printf("🚨 CRITICAL: Your database backup is at: %s\n", backupPath)
-				fmt.Printf("🚨 Please manually restore it!\n")
+
+			if *createBackup {
+				// Try to restore backup
+				fmt.Printf("❌ Failed to replace database. Attempting to restore backup...\n")
+				if restoreErr := os.Rename(backupPath, *sourceDBPath); restoreErr != nil {
+					log.Error("CRITICAL: Failed to restore backup", "restoreError", restoreErr, "originalError", err)
+					fmt.Printf("🚨 CRITICAL: Your database backup is at: %s\n", backupPath)
+					fmt.Printf("🚨 Please manually restore it!\n")
+				} else {
+					fmt.Printf("✅ Backup restored successfully\n")
+				}
 			} else {
-				fmt.Printf("✅ Backup restored successfully\n")
+				fmt.Printf("🚨 CRITICAL: Original database removed but replacement failed!\n")
+				fmt.Printf("🚨 Compacted database is at: %s\n", actualOutputPath)
+				fmt.Printf("🚨 Please manually move it to: %s\n", *sourceDBPath)
 			}
 			os.Exit(1)
 		}
@@ -250,8 +286,13 @@ func main() {
 		fmt.Printf("\n=== Next Steps ===\n")
 		fmt.Printf("1. Your database has been compacted in-place\n")
 		fmt.Printf("2. Start your Erigon node to verify everything works\n")
-		fmt.Printf("3. If everything works, remove backup: rm -rf %s\n", backupPath)
-		fmt.Printf("4. If there are issues, restore backup: mv %s %s\n", backupPath, *sourceDBPath)
+
+		if *createBackup {
+			fmt.Printf("3. If everything works, remove backup: rm -rf %s\n", backupPath)
+			fmt.Printf("4. If there are issues, restore backup: mv %s %s\n", backupPath, *sourceDBPath)
+		} else {
+			fmt.Printf("3. ⚠️  No backup was created - original database was replaced directly\n")
+		}
 	} else {
 		fmt.Printf("\n=== Next Steps ===\n")
 		fmt.Printf("1. Stop your Erigon node\n")

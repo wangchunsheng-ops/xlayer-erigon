@@ -46,8 +46,11 @@ prune-mdbx-data compact-db -source ./seq/smt -output ./seq/smt.compact -type smt
 ### 🔄 In-Place Mode (Recommended)
 Compacts database and automatically replaces the original:
 ```bash
-# Chaindata in-place compaction (saves disk space)
+# Chaindata in-place compaction (fast, no backup)
 prune-mdbx-data compact-db -source ./seq/chaindata -in-place
+
+# Chaindata in-place compaction with backup (safer)
+prune-mdbx-data compact-db -source ./seq/chaindata -in-place -backup
 
 # SMT in-place compaction
 prune-mdbx-data compact-db -source ./seq/smt -in-place -type smt
@@ -57,13 +60,25 @@ prune-mdbx-data compact-db -source ./seq/smt -in-place -type smt
 
 ## Safety Procedures
 
-### 🔄 In-Place Mode (Automated)
-The tool handles backup and replacement automatically:
+### 🔄 In-Place Mode Options
 
+**Default Mode (No Backup - Fastest)**:
 1. **Stop Erigon node** completely
 2. **Run in-place compaction**:
    ```bash
    prune-mdbx-data compact-db -source ./seq/chaindata -in-place
+   ```
+3. **Tool automatically**:
+   - Compacts to temporary location
+   - Removes original database
+   - Moves compacted database to original location
+4. **Start Erigon node** and verify operation
+
+**Backup Mode (Safer)**:
+1. **Stop Erigon node** completely  
+2. **Run in-place compaction with backup**:
+   ```bash
+   prune-mdbx-data compact-db -source ./seq/chaindata -in-place -backup
    ```
 3. **Tool automatically**:
    - Creates backup (`database.backup`)
