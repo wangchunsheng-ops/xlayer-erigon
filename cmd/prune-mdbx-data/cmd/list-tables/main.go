@@ -73,7 +73,7 @@ func getTableList(db kv.RwDB) ([]string, error) {
 	return tables, nil
 }
 
-// getTableStats gets statistics info of table (using default pageSize)
+// getTableStats gets statistics info of table using database's actual page size
 func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error) {
 	ctx := context.Background()
 	tx, err := db.BeginRo(ctx)
@@ -89,14 +89,39 @@ func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error)
 		}
 
 		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
-		// Use default MDBX page size of 8192 bytes
-		const defaultPageSize = 8192
-		sizeBytes := totalPages * defaultPageSize
+
+		// Get actual page size from the database instance, not from stat
+		pageSize := db.PageSize()
+		sizeBytes := totalPages * pageSize
 
 		return stat.Entries, sizeBytes, totalPages, nil
 	}
 
 	return 0, 0, 0, fmt.Errorf("not MDBX transaction")
+}
+
+// getDatabaseSize gets the actual database size on disk (including metadata, freelist, etc.)
+func getDatabaseSize(db kv.RwDB) (uint64, error) {
+	ctx := context.Background()
+	tx, err := db.BeginRo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if mdbxTx, ok := tx.(*mdbxpkg.MdbxTx); ok {
+		return mdbxTx.DBSize()
+	}
+
+	return 0, fmt.Errorf("not MDBX transaction")
+}
+
+// abs returns the absolute value of x
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func main() {
@@ -355,6 +380,66 @@ func main() {
 
 			sizeStr := datasize.ByteSize(sizeBytes).HumanReadable()
 			fmt.Printf("  %-30s: %s (%d entries, %d pages)\n", tableName, sizeStr, entries, pages)
+		}
+	}
+
+	// Database size comparison
+	fmt.Printf("\n=== Database Size Analysis ===\n")
+
+	// Calculate total table sizes for chaindata
+	var chainTotalTableSize uint64
+	for _, tableName := range chainTables {
+		_, sizeBytes, _, err := getTableStats(chaindb, tableName)
+		if err == nil {
+			chainTotalTableSize += sizeBytes
+		}
+	}
+
+	// Get actual database size for chaindata
+	chainActualSize, err := getDatabaseSize(chaindb)
+	if err != nil {
+		fmt.Printf("Failed to get chaindata database size: %v\n", err)
+	} else {
+		chainTotalStr := datasize.ByteSize(chainTotalTableSize).HumanReadable()
+		chainActualStr := datasize.ByteSize(chainActualSize).HumanReadable()
+		chainDiff := int64(chainActualSize) - int64(chainTotalTableSize)
+		chainDiffStr := datasize.ByteSize(uint64(abs(chainDiff))).HumanReadable()
+		chainDiffPercent := float64(chainDiff) / float64(chainActualSize) * 100
+
+		fmt.Printf("Chaindata Database:\n")
+		fmt.Printf("  Tables total size:     %s\n", chainTotalStr)
+		fmt.Printf("  Database actual size:  %s\n", chainActualStr)
+		fmt.Printf("  Difference:           %s%s (%.1f%%)\n",
+			map[bool]string{true: "+", false: ""}[chainDiff >= 0],
+			chainDiffStr, chainDiffPercent)
+	}
+
+	// Calculate for SMT if separated
+	if smtSeparated && smtdb != nil {
+		var smtTotalTableSize uint64
+		for _, tableName := range smtTables {
+			_, sizeBytes, _, err := getTableStats(smtdb, tableName)
+			if err == nil {
+				smtTotalTableSize += sizeBytes
+			}
+		}
+
+		smtActualSize, err := getDatabaseSize(smtdb)
+		if err != nil {
+			fmt.Printf("Failed to get SMT database size: %v\n", err)
+		} else {
+			smtTotalStr := datasize.ByteSize(smtTotalTableSize).HumanReadable()
+			smtActualStr := datasize.ByteSize(smtActualSize).HumanReadable()
+			smtDiff := int64(smtActualSize) - int64(smtTotalTableSize)
+			smtDiffStr := datasize.ByteSize(uint64(abs(smtDiff))).HumanReadable()
+			smtDiffPercent := float64(smtDiff) / float64(smtActualSize) * 100
+
+			fmt.Printf("\nSMT Database:\n")
+			fmt.Printf("  Tables total size:     %s\n", smtTotalStr)
+			fmt.Printf("  Database actual size:  %s\n", smtActualStr)
+			fmt.Printf("  Difference:           %s%s (%.1f%%)\n",
+				map[bool]string{true: "+", false: ""}[smtDiff >= 0],
+				smtDiffStr, smtDiffPercent)
 		}
 	}
 

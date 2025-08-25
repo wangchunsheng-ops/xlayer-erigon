@@ -830,7 +830,8 @@ func getCriticalTables() map[string]bool {
 	critical["MaxTxNum"] = true
 
 	// Critical block data tables (for node operation)
-	critical["Header"] = true
+	// Note: Header can be partially pruned (keep recent batches)
+	// critical["Header"] = true  // Removed - allow batch-based pruning
 	critical["CanonicalHeader"] = true
 	critical["HeaderNumber"] = true
 
