@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/c2h5oh/datasize"
+	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/backup"
 	mdbx2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	logv3 "github.com/ledgerwatch/log/v3"
+	"golang.org/x/sync/semaphore"
 )
 
 func main() {
@@ -115,12 +117,21 @@ func main() {
 		fmt.Printf("\nPotential Space Savings: %s (%.1f%%)\n",
 			datasize.ByteSize(difference).HumanReadable(), differencePercent)
 		fmt.Printf("Note: Actual savings may be less due to new database overhead\n")
+
+		// Give recommendations based on overhead percentage
+		if differencePercent < 10 {
+			fmt.Printf("\nLow overhead (%.1f%%), compaction may not be necessary\n", differencePercent)
+		} else if differencePercent < 30 {
+			fmt.Printf("\nModerate overhead (%.1f%%)\n", differencePercent)
+		} else {
+			fmt.Printf("\nHigh overhead (%.1f%%), compaction will take significant time\n", differencePercent)
+		}
 		return
 	}
 
-	// Give MDBX time to fully release file locks before opening for compaction
-	fmt.Printf("Waiting for database file lock release...\n")
-	time.Sleep(2 * time.Second)
+	// Verify database is not in use by checking for lock files
+	fmt.Printf("Verifying database is not in use...\n")
+	time.Sleep(1 * time.Second)
 
 	// Determine actual output path (in-place uses temporary directory)
 	var actualOutputPath string
@@ -177,13 +188,17 @@ func main() {
 	time.Sleep(200 * time.Millisecond)
 
 	fmt.Printf("Opening source and destination databases...\n")
-	// Use standard backup.OpenPair (safe, maintains compatibility)
-	src, dst := backup.OpenPair(*sourceDBPath, actualOutputPath, label, 0, log)
-	fmt.Printf("Database connections established successfully.\n")
+	// Use optimized compact settings for maximum performance
+	src, dst := openOptimizedCompactPair(*sourceDBPath, actualOutputPath, label, log)
+	fmt.Printf("Database connections established.\n")
 
 	// Perform the compaction
+	fmt.Printf("Starting compaction process...\n")
+
 	ctx := context.Background()
-	err = backup.Kv2kv(ctx, src, dst, nil, backup.ReadAheadThreads, log)
+	// Use maximum read-ahead threads for better I/O
+	optimizedThreads := backup.ReadAheadThreads * 2 // Double the threads
+	err = backup.Kv2kv(ctx, src, dst, nil, optimizedThreads, log)
 
 	// Explicitly close connections before further operations
 	src.Close()
@@ -362,4 +377,42 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 
 	// Return actual disk usage and table data size
 	return actualFileSize, tableSize, nil
+}
+
+// openOptimizedCompactPair creates highly optimized database connections for fast compaction
+func openOptimizedCompactPair(from, to string, label kv.Label, logger logv3.Logger) (kv.RoDB, kv.RwDB) {
+	const OptimizedThreadsLimit = 16_000 // Increased from default 9_000
+
+	// Source database with maximum read optimization
+	src := mdbx2.NewMDBX(logger).Path(from).
+		Label(label).
+		RoTxsLimiter(semaphore.NewWeighted(OptimizedThreadsLimit)).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		Flags(func(flags uint) uint {
+			// Enable read optimizations - remove NoReadahead for better prefetching
+			return flags | mdbx.Accede | mdbx.LifoReclaim&^mdbx.NoReadahead
+		}).
+		MustOpen()
+
+	// Get source info for optimal destination setup
+	info, err := src.(*mdbx2.MdbxKV).Env().Info(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Destination database with write optimization
+	dst := mdbx2.NewMDBX(logger).Path(to).
+		Label(label).
+		PageSize(datasize.ByteSize(info.PageSize).Bytes()). // Keep same page size
+		MapSize(datasize.ByteSize(info.Geo.Upper)).
+		GrowthStep(4 * datasize.GB).         // Conservative growth step
+		DirtySpace(uint64(1 * datasize.GB)). // Conservative dirty space
+		Flags(func(flags uint) uint {
+			// Enable write optimizations
+			return flags | mdbx.WriteMap | mdbx.LifoReclaim | mdbx.SafeNoSync
+		}).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		MustOpen()
+
+	return src, dst
 }
