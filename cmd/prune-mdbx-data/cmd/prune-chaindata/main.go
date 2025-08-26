@@ -1655,7 +1655,7 @@ func executeOptimizedTableDeletion(
 	partiallyPrunedTables map[string]bool,
 	pruneLevel PruneLevel,
 	log logv3.Logger,
-) (int, int, uint64) {
+) (int, int, uint64, []tableSizeInfo, []tableSizeInfo) {
 	const largeTableThreshold = 500 * 1024 * 1024     // 500MB
 	const hugeTableThreshold = 2 * 1024 * 1024 * 1024 // 2GB
 
@@ -1675,94 +1675,50 @@ func executeOptimizedTableDeletion(
 		}
 	}
 
-	fmt.Printf("📊 Table size distribution: Small(%d) < 500MB, Large(%d) < 2GB, Huge(%d) >= 2GB\n",
+	fmt.Printf("Table size distribution: Small(%d) < 500MB, Large(%d) < 2GB, Huge(%d) >= 2GB\n",
 		len(smallTables), len(largeTables), len(hugeTables))
 
-	// Strategy 1: Batch delete small tables in current transaction (fastest)
+	// Strategy 1: Process small tables in current transaction (most efficient)
 	if len(smallTables) > 0 {
-		fmt.Printf("🚀 Batch deleting %d small tables...\n", len(smallTables))
-		smallDeleted, smallActual, smallSize := deleteSmallTablesInBatch(mainTx, smallTables, preCollectedStats, partiallyPrunedTables, pruneLevel)
-		deletedCount += smallDeleted
-		actuallyDeletedTables += smallActual
-		actualDeletedSize += smallSize
-	}
+		fmt.Printf("Processing %d small tables in current transaction...\n", len(smallTables))
+		for _, tableInfo := range smallTables {
+			table := tableInfo.name
 
-	// Strategy 2: Individual NoSync transactions for large tables (balanced)
-	if len(largeTables) > 0 {
-		fmt.Printf("⚡ Processing %d large tables with NoSync transactions...\n", len(largeTables))
-		largeDeleted, largeActual, largeSize := deleteLargeTablesWithNoSync(chaindb, largeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
-		deletedCount += largeDeleted
-		actuallyDeletedTables += largeActual
-		actualDeletedSize += largeSize
-	}
-
-	// Strategy 3: Optimized huge table deletion with DropBucket (most aggressive)
-	if len(hugeTables) > 0 {
-		fmt.Printf("🔥 Processing %d huge tables with optimized Drop strategy...\n", len(hugeTables))
-		hugeDeleted, hugeActual, hugeSize := deleteHugeTablesOptimized(chaindb, hugeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
-		deletedCount += hugeDeleted
-		actuallyDeletedTables += hugeActual
-		actualDeletedSize += hugeSize
-	}
-
-	return deletedCount, actuallyDeletedTables, actualDeletedSize
-}
-
-// deleteSmallTablesInBatch deletes small tables in the current transaction for maximum efficiency
-func deleteSmallTablesInBatch(
-	tx kv.RwTx,
-	smallTables []tableSizeInfo,
-	preCollectedStats map[string]struct {
-		entries   uint64
-		sizeBytes uint64
-		pages     uint64
-	},
-	partiallyPrunedTables map[string]bool,
-	pruneLevel PruneLevel,
-) (int, int, uint64) {
-	deletedCount := 0
-	actuallyDeletedTables := 0
-	var actualDeletedSize uint64
-
-	for i, tableInfo := range smallTables {
-		table := tableInfo.name
-
-		// Skip block tables if we did partial pruning
-		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
-			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
-			continue
-		}
-
-		// Use pre-collected statistics from the initial scan
-		stats, hasStats := preCollectedStats[table]
-		if hasStats && stats.entries > 0 {
-			actualDeletedSize += stats.sizeBytes
-			actuallyDeletedTables++
-		}
-
-		err := tx.ClearBucket(table)
-		if err != nil {
-			fmt.Printf("❌ Failed to clear small table %s: %v\n", table, err)
-		} else {
-			if hasStats && stats.entries > 0 {
-				fmt.Printf("✓ Cleared table: %s (%s, %d entries)\n", table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
-			} else {
-				fmt.Printf("✓ Cleared table: %s (was empty)\n", table)
+			// Skip block tables if we did partial pruning
+			if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
+				fmt.Printf("Skipped table: %s (partial pruning already applied)\n", table)
+				continue
 			}
-			deletedCount++
-		}
 
-		// Progress for batch operations
-		if (i+1)%10 == 0 {
-			fmt.Printf("📦 Processed %d/%d small tables...\n", i+1, len(smallTables))
+			// Use pre-collected statistics
+			stats, hasStats := preCollectedStats[table]
+			if hasStats && stats.entries > 0 {
+				actualDeletedSize += stats.sizeBytes
+				actuallyDeletedTables++
+			}
+
+			err := mainTx.ClearBucket(table)
+			if err != nil {
+				log.Error("Failed to clear small table", "table", table, "error", err)
+				fmt.Printf("Failed to clear table %s: %v\n", table, err)
+			} else {
+				if hasStats && stats.entries > 0 {
+					fmt.Printf("Cleared table: %s (%s, %d entries)\n",
+						table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
+				} else {
+					fmt.Printf("Cleared table: %s (was empty)\n", table)
+				}
+				deletedCount++
+			}
 		}
 	}
 
-	return deletedCount, actuallyDeletedTables, actualDeletedSize
+	// Return unprocessed large/huge tables for post-commit processing
+	return deletedCount, actuallyDeletedTables, actualDeletedSize, largeTables, hugeTables
 }
 
-// deleteLargeTablesWithNoSync uses individual NoSync transactions for better performance on large tables
-func deleteLargeTablesWithNoSync(
+// processLargeTablesWithNoSync processes large tables with individual NoSync transactions
+func processLargeTablesWithNoSync(
 	chaindb kv.RwDB,
 	largeTables []tableSizeInfo,
 	preCollectedStats map[string]struct {
@@ -1785,7 +1741,7 @@ func deleteLargeTablesWithNoSync(
 
 		// Skip block tables if we did partial pruning
 		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
-			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
+			fmt.Printf("Skipped table: %s (partial pruning already applied)\n", table)
 			continue
 		}
 
@@ -1796,7 +1752,7 @@ func deleteLargeTablesWithNoSync(
 			actuallyDeletedTables++
 		}
 
-		fmt.Printf("🔄 Processing large table (%d/%d): %s (%s)...\n",
+		fmt.Printf("Processing large table (%d/%d): %s (%s)...\n",
 			i+1, len(largeTables), table, datasize.ByteSize(stats.sizeBytes).HumanReadable())
 
 		// Use NoSync transaction for better performance
@@ -1806,13 +1762,13 @@ func deleteLargeTablesWithNoSync(
 
 		if err != nil {
 			log.Error("Failed to clear large table", "table", table, "error", err)
-			fmt.Printf("❌ Failed to clear large table %s: %v\n", table, err)
+			fmt.Printf("Failed to clear large table %s: %v\n", table, err)
 		} else {
 			if hasStats && stats.entries > 0 {
-				fmt.Printf("✅ Cleared large table: %s (%s, %d entries)\n",
+				fmt.Printf("Cleared large table: %s (%s, %d entries)\n",
 					table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
 			} else {
-				fmt.Printf("✅ Cleared large table: %s (was empty)\n", table)
+				fmt.Printf("Cleared large table: %s (was empty)\n", table)
 			}
 			deletedCount++
 		}
@@ -1821,8 +1777,8 @@ func deleteLargeTablesWithNoSync(
 	return deletedCount, actuallyDeletedTables, actualDeletedSize
 }
 
-// deleteHugeTablesOptimized uses the most aggressive deletion strategy for huge tables
-func deleteHugeTablesOptimized(
+// processHugeTablesOptimized processes huge tables with the most aggressive strategies
+func processHugeTablesOptimized(
 	chaindb kv.RwDB,
 	hugeTables []tableSizeInfo,
 	preCollectedStats map[string]struct {
@@ -1845,7 +1801,7 @@ func deleteHugeTablesOptimized(
 
 		// Skip block tables if we did partial pruning
 		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
-			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
+			fmt.Printf("Skipped table: %s (partial pruning already applied)\n", table)
 			continue
 		}
 
@@ -1856,45 +1812,23 @@ func deleteHugeTablesOptimized(
 			actuallyDeletedTables++
 		}
 
-		fmt.Printf("🔥 Processing huge table (%d/%d): %s (%s)...\n",
+		fmt.Printf("Processing huge table (%d/%d): %s (%s)...\n",
 			i+1, len(hugeTables), table, datasize.ByteSize(stats.sizeBytes).HumanReadable())
 
-		// For huge tables, we have two strategies to try:
-		// 1. Try DropBucket if table can be recreated (fastest but destructive)
-		// 2. Fall back to ClearBucket with NoSync (safer but slower)
-
-		var err error
-		strategy := "drop"
-
-		// Check if this is a table that can be safely dropped and recreated
-		// For pruning operations, most tables can be dropped since we're removing them anyway
-		if isTableSafeToDropAndRecreate(table) {
-			fmt.Printf("🗑️  Using Drop+Recreate strategy for %s...\n", table)
-
-			// Use Drop strategy - this is much faster for huge tables
-			err = chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
-				// First mark the table as deprecated temporarily to allow drop
-				return dropTableForPruning(tx, table)
-			})
-		} else {
-			strategy = "clear"
-			fmt.Printf("🧹 Using Clear strategy for %s (table must be preserved)...\n", table)
-
-			// Fall back to clear strategy
-			err = chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
-				return tx.ClearBucket(table)
-			})
-		}
+		// For huge tables, try ClearBucket with NoSync (most compatible and still fast)
+		err := chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
+			return tx.ClearBucket(table)
+		})
 
 		if err != nil {
-			log.Error("Failed to process huge table", "table", table, "strategy", strategy, "error", err)
-			fmt.Printf("❌ Failed to process huge table %s (%s strategy): %v\n", table, strategy, err)
+			log.Error("Failed to clear huge table", "table", table, "error", err)
+			fmt.Printf("Failed to clear huge table %s: %v\n", table, err)
 		} else {
 			if hasStats && stats.entries > 0 {
-				fmt.Printf("🚀 Processed huge table: %s (%s, %d entries) using %s strategy\n",
-					table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries, strategy)
+				fmt.Printf("Cleared huge table: %s (%s, %d entries)\n",
+					table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
 			} else {
-				fmt.Printf("🚀 Processed huge table: %s (was empty) using %s strategy\n", table, strategy)
+				fmt.Printf("Cleared huge table: %s (was empty)\n", table)
 			}
 			deletedCount++
 		}
@@ -2449,22 +2383,46 @@ func main() {
 		}
 	}
 
-	fmt.Printf("🗂️ Processing %d tables in optimized order (small to large)...\n", len(sortedTables))
+	fmt.Printf("Processing %d tables in optimized order (small to large)...\n", len(sortedTables))
 
-	// Use optimized deletion strategy
-	deletedCount, actuallyDeletedTables, actualDeletedSize = executeOptimizedTableDeletion(
+	// Use optimized deletion strategy (processes small tables in main transaction)
+	smallDeleted, smallActual, smallSize, largeTables, hugeTables := executeOptimizedTableDeletion(
 		tx, chaindb, sortedTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
-	if deletedCount < 0 {
+	if smallDeleted < 0 {
 		// Error occurred, but continue with transaction commit for any successful operations
-		deletedCount = 0
+		smallDeleted = 0
 	}
 
-	// Commit transaction
+	deletedCount += smallDeleted
+	actuallyDeletedTables += smallActual
+	actualDeletedSize += smallSize
+
+	// Commit main transaction before processing large tables
 	err = tx.Commit()
 	if err != nil {
-		log.Error("Failed to commit transaction", "error", err)
+		log.Error("Failed to commit main transaction", "error", err)
 		tx.Rollback()
 		os.Exit(1)
+	}
+
+	// Strategy 2: Process large tables with individual NoSync transactions (high performance)
+	if len(largeTables) > 0 {
+		fmt.Printf("Processing %d large tables with NoSync transactions...\n", len(largeTables))
+		largeDeleted, largeActual, largeSize := processLargeTablesWithNoSync(
+			chaindb, largeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
+		deletedCount += largeDeleted
+		actuallyDeletedTables += largeActual
+		actualDeletedSize += largeSize
+	}
+
+	// Strategy 3: Process huge tables with optimized strategies (maximum performance)
+	if len(hugeTables) > 0 {
+		fmt.Printf("Processing %d huge tables with optimized strategies...\n", len(hugeTables))
+		hugeDeleted, hugeActual, hugeSize := processHugeTablesOptimized(
+			chaindb, hugeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
+		deletedCount += hugeDeleted
+		actuallyDeletedTables += hugeActual
+		actualDeletedSize += hugeSize
 	}
 
 	// Calculate space savings with overflow protection
