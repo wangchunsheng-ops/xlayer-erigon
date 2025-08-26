@@ -48,7 +48,22 @@ func AssertHeader(t *testing.T, header *types1.Header, rcvHeader *types1.Header)
 }
 
 func AssertCommonTx(t *testing.T, msg kafkaTypes.TransactionMessage, tx types1.Transaction, blockNumber uint64, txType int) {
-	assert.Equal(t, msg.BlockNumber, blockNumber)
+	assert.Equal(t, int(msg.Type), txType)
+	assert.Equal(t, msg.Hash, tx.Hash())
+	assert.Equal(t, msg.From, testFromAddr)
+	assert.Equal(t, msg.ChainID.Uint64(), tx.GetChainID().Uint64())
+	assert.Equal(t, msg.Nonce, tx.GetNonce())
+	assert.Equal(t, msg.Gas, tx.GetGas())
+	assert.Equal(t, msg.To.String(), testToAddr.String())
+	assert.Equal(t, msg.Value.String(), tx.GetValue().String())
+	assert.Equal(t, string(msg.Data), string(tx.GetData()))
+	v, r, s := tx.RawSignatureValues()
+	assert.Equal(t, msg.R, *r)
+	assert.Equal(t, msg.S, *s)
+	assert.Equal(t, msg.V, *v)
+}
+
+func AssertCommonTxWithoutBlockNumber(t *testing.T, msg kafkaTypes.TransactionMessage, tx types1.Transaction, txType int) {
 	assert.Equal(t, int(msg.Type), txType)
 	assert.Equal(t, msg.Hash, tx.Hash())
 	assert.Equal(t, msg.From, testFromAddr)
