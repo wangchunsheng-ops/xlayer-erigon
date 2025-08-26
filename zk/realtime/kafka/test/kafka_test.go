@@ -101,50 +101,6 @@ var (
 	testHash = libcommon.HexToHash("0x1234567890abcdef")
 )
 
-func TestStressTestKafkaProducer(t *testing.T) {
-	rightvrsTx.SetSender(testFromAddr)
-	cfg := kafka.KafkaConfig{
-		BootstrapServers: []string{"0.0.0.0:9095"},
-		BlockTopic:       "xlayer-test-block",
-		TxTopic:          "xlayer-test-tx",
-		ErrorTopic:       "xlayer-test-error",
-		ClientID:         "xlayer-test-consumer",
-		GroupID:          "xlayer-test-consumer-1",
-	}
-
-	err := createKafkaTopics(cfg)
-	assert.NilError(t, err)
-
-	successChan := make(chan struct{}, 10000)
-	producer, err := kafka.NewKafkaProducer(cfg, context.Background(), nil, successChan)
-	assert.NilError(t, err)
-
-	startTime := time.Now()
-	for i := 1; i <= 1000; i++ {
-		err = producer.SendKafkaTransaction(uint64(i), rightvrsTx, rightvrsTxReceipt, rightvrsTxInnerTxs, rightvrsTxChangeset)
-		assert.NilError(t, err)
-	}
-
-	// Sending 1000 messages should not be blocking, and should take less than 100ms
-	elapsed := time.Since(startTime)
-	fmt.Printf("Batch producer send took %s to dispatch 1000 messages\n", elapsed)
-	require.Less(t, elapsed, 100*time.Millisecond)
-
-	for i := 0; i < 1000; i++ {
-		select {
-		case <-successChan:
-		case <-time.After(1 * time.Second):
-			t.Fatalf("Timeout waiting for success message %d", i)
-		}
-	}
-	elapsed = time.Since(startTime)
-	fmt.Printf("Producer took %s to send 1000 messages to kafka broker\n", elapsed)
-	require.Less(t, elapsed, 200*time.Millisecond)
-
-	err = producer.Close()
-	assert.NilError(t, err)
-}
-
 func TestKafka(t *testing.T) {
 	rightvrsTx.SetSender(testFromAddr)
 	cfg := kafka.KafkaConfig{
@@ -266,6 +222,50 @@ func TestKafka(t *testing.T) {
 
 	ctxWithCancel()
 	err = consumer.Close()
+	assert.NilError(t, err)
+}
+
+func TestStressTestKafkaProducer(t *testing.T) {
+	rightvrsTx.SetSender(testFromAddr)
+	cfg := kafka.KafkaConfig{
+		BootstrapServers: []string{"0.0.0.0:9095"},
+		BlockTopic:       "xlayer-test-block",
+		TxTopic:          "xlayer-test-tx",
+		ErrorTopic:       "xlayer-test-error",
+		ClientID:         "xlayer-test-consumer",
+		GroupID:          "xlayer-test-consumer-1",
+	}
+
+	err := createKafkaTopics(cfg)
+	assert.NilError(t, err)
+
+	successChan := make(chan struct{}, 10000)
+	producer, err := kafka.NewKafkaProducer(cfg, context.Background(), nil, successChan)
+	assert.NilError(t, err)
+
+	startTime := time.Now()
+	for i := 1; i <= 1000; i++ {
+		err = producer.SendKafkaTransaction(uint64(i), rightvrsTx, rightvrsTxReceipt, rightvrsTxInnerTxs, rightvrsTxChangeset)
+		assert.NilError(t, err)
+	}
+
+	// Sending 1000 messages should not be blocking, and should take less than 100ms
+	elapsed := time.Since(startTime)
+	fmt.Printf("Batch producer send took %s to dispatch 1000 messages\n", elapsed)
+	require.Less(t, elapsed, 100*time.Millisecond)
+
+	for i := 0; i < 1000; i++ {
+		select {
+		case <-successChan:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timeout waiting for success message %d", i)
+		}
+	}
+	elapsed = time.Since(startTime)
+	fmt.Printf("Producer took %s to send 1000 messages to kafka broker\n", elapsed)
+	require.Less(t, elapsed, 200*time.Millisecond)
+
+	err = producer.Close()
 	assert.NilError(t, err)
 }
 
