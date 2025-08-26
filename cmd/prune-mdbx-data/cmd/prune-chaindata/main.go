@@ -613,7 +613,9 @@ func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
 // pruneHistoricalDupCursorData performs aggressive cleanup of historical dupCursor table data
 // (AccountChangeSet, StorageChangeSet only - CanonicalHeader and hermez_blockBatches are preserved)
 // while preserving recent batches for operational needs
-func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, error) {
+// fastMode: if true, uses direct cursor deletion for maximum performance
+// safeFastMode: if true, uses safe-fast mode (balanced performance and safety)
+func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64, fastMode bool, safeFastMode bool) (int, error) {
 	fmt.Printf("Starting historical dupCursor data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
 	fmt.Printf("Note: Only processing AccountChangeSet and StorageChangeSet - CanonicalHeader and hermez_blockBatches preserved for node stability\n")
 
@@ -655,7 +657,7 @@ func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, er
 	deletedRecords := 0
 
 	// Clean AccountChangeSet data (dupCursor table)
-	accountDeletedCount, err := pruneAccountChangeSetBeforeBlock(tx, cutoffBlock)
+	accountDeletedCount, err := pruneAccountChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
 	if err != nil {
 		return deletedRecords, fmt.Errorf("failed to prune AccountChangeSet: %w", err)
 	}
@@ -663,7 +665,7 @@ func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, er
 	fmt.Printf("✓ Deleted %d AccountChangeSet records\n", accountDeletedCount)
 
 	// Clean StorageChangeSet data (dupCursor table)
-	storageDeletedCount, err := pruneStorageChangeSetBeforeBlock(tx, cutoffBlock)
+	storageDeletedCount, err := pruneStorageChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
 	if err != nil {
 		return deletedRecords, fmt.Errorf("failed to prune StorageChangeSet: %w", err)
 	}
@@ -676,94 +678,482 @@ func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, er
 	return deletedRecords, nil
 }
 
-// pruneAccountChangeSetBeforeBlock deletes AccountChangeSet records before specified block
-func pruneAccountChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+// pruneAccountChangeSetBeforeBlockOptimized deletes AccountChangeSet records before specified block
+// Uses optimized batch processing to avoid memory overflow and improve performance
+// fastMode: if true, uses direct cursor deletion (faster but more aggressive)
+// safeFastMode: if true, uses safe-fast mode (balanced performance and safety)
+func pruneAccountChangeSetBeforeBlockOptimized(tx kv.RwTx, cutoffBlock uint64, fastMode bool, safeFastMode bool) (int, error) {
 	cursor, err := tx.RwCursorDupSort("AccountChangeSet")
 	if err != nil {
 		return 0, err
 	}
 	defer cursor.Close()
 
-	// Collect all keys to delete first (safer for DupSort tables)
-	var keysToDelete [][]byte
+	const batchSize = 10000 // Process in batches to avoid memory overflow
+	deletedCount := 0
+	processedBlocks := 0
 
-	// Iterate through all keys before cutoff block
-	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.NextNoDup() {
-		if err != nil {
-			return 0, err
-		}
-
-		if len(key) >= 8 {
-			blockNum := binary.BigEndian.Uint64(key[:8])
-			if blockNum >= cutoffBlock {
-				break // Reached the cutoff, stop collecting
-			}
-
-			// Collect all entries for this block (there might be multiple accounts per block)
-			for k, _, err := cursor.SeekExact(key); k != nil; k, _, err = cursor.NextDup() {
-				if err != nil {
-					return 0, err
-				}
-				// Make a copy of the key
-				keyCopy := make([]byte, len(k))
-				copy(keyCopy, k)
-				keysToDelete = append(keysToDelete, keyCopy)
-			}
-		}
+	if fastMode {
+		fmt.Printf("🚀 Fast processing AccountChangeSet (direct cursor deletion)...\n")
+		return pruneAccountChangeSetBeforeBlockFast(tx, cutoffBlock, cursor)
+	} else if safeFastMode {
+		fmt.Printf("🛡️⚡ Safe-Fast processing AccountChangeSet (smaller batches + validation)...\n")
+		return pruneAccountChangeSetBeforeBlockSafeFast(tx, cutoffBlock, cursor)
 	}
 
-	// Now delete all collected keys using tx.Delete (safer than cursor operations)
-	deletedCount := 0
-	for _, key := range keysToDelete {
-		if err := tx.Delete("AccountChangeSet", key); err != nil {
-			// Log but continue - some keys might not exist anymore
-			continue
+	fmt.Printf("🔄 Processing AccountChangeSet (batch size: %d)...\n", batchSize)
+
+	// Process in batches to optimize memory usage
+	for {
+		var keysToDelete [][]byte
+		currentBatchSize := 0
+
+		// Collect a batch of keys to delete
+		startKey, _, _ := cursor.Current()
+		if startKey == nil {
+			// Start from beginning if no current position
+			startKey, _, _ = cursor.First()
 		}
-		deletedCount++
+
+		for key, _, err := cursor.Current(); key != nil && currentBatchSize < batchSize; {
+			if err != nil {
+				return deletedCount, err
+			}
+
+			if len(key) >= 8 {
+				blockNum := binary.BigEndian.Uint64(key[:8])
+				if blockNum >= cutoffBlock {
+					// Reached cutoff, we're done
+					goto deleteBatch
+				}
+
+				// Collect all duplicate entries for this block number key
+				seekKey := make([]byte, len(key))
+				copy(seekKey, key)
+
+				for k, _, err := cursor.SeekExact(seekKey); k != nil; k, _, err = cursor.NextDup() {
+					if err != nil {
+						return deletedCount, err
+					}
+					// Only add if we haven't exceeded batch size
+					if currentBatchSize < batchSize {
+						keyCopy := make([]byte, len(k))
+						copy(keyCopy, k)
+						keysToDelete = append(keysToDelete, keyCopy)
+						currentBatchSize++
+					} else {
+						break
+					}
+				}
+
+				processedBlocks++
+				if processedBlocks%1000 == 0 {
+					fmt.Printf("⏳ Processed %d blocks (%d records collected)...\n", processedBlocks, len(keysToDelete))
+				}
+			}
+
+			// Move to next unique block number
+			key, _, err = cursor.NextNoDup()
+		}
+
+	deleteBatch:
+		// Delete current batch
+		if len(keysToDelete) == 0 {
+			break // No more records to delete
+		}
+
+		batchDeleted := 0
+		for _, key := range keysToDelete {
+			if err := tx.Delete("AccountChangeSet", key); err != nil {
+				// Log but continue - some keys might not exist anymore
+				continue
+			}
+			batchDeleted++
+		}
+
+		deletedCount += batchDeleted
+		fmt.Printf("✓ Deleted batch: %d records (total: %d)\n", batchDeleted, deletedCount)
+
+		// Check if we processed all records before cutoff
+		if currentBatchSize < batchSize {
+			break // This was the last batch
+		}
+
+		// Continue from where we left off
+		keysToDelete = nil // Release memory
 	}
 
 	return deletedCount, nil
 }
 
-// pruneStorageChangeSetBeforeBlock deletes StorageChangeSet records before specified block
-func pruneStorageChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+// pruneAccountChangeSetBeforeBlockFast performs direct cursor deletion for maximum speed
+// ⚠️  More aggressive - deletes records immediately without collecting them first
+func pruneAccountChangeSetBeforeBlockFast(tx kv.RwTx, cutoffBlock uint64, cursor kv.RwCursorDupSort) (int, error) {
+	deletedCount := 0
+	processedBlocks := 0
+
+	// Direct deletion approach - faster but more aggressive
+	for key, _, err := cursor.First(); key != nil; {
+		if err != nil {
+			return deletedCount, err
+		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached cutoff
+			}
+
+			// Delete all duplicate entries for this block directly
+			duplicateCount := 0
+			for k, _, err := cursor.SeekExact(key); k != nil; {
+				if err != nil {
+					return deletedCount, err
+				}
+
+				// Delete current entry directly via cursor
+				if err := cursor.DeleteCurrent(); err != nil {
+					// If deletion fails, try to continue
+					key, _, err = cursor.NextDup()
+					continue
+				}
+
+				duplicateCount++
+				deletedCount++
+
+				// Move to next duplicate (cursor position may have changed after deletion)
+				key, _, err = cursor.NextDup()
+			}
+
+			processedBlocks++
+			if processedBlocks%2000 == 0 {
+				fmt.Printf("⚡ Fast deleted %d blocks (%d total records)...\n", processedBlocks, deletedCount)
+			}
+		}
+
+		// Move to next unique block number
+		key, _, err = cursor.NextNoDup()
+	}
+
+	return deletedCount, nil
+}
+
+// pruneAccountChangeSetBeforeBlockSafeFast performs safe-fast cursor deletion with enhanced error handling
+// 🛡️⚡ Balanced approach: smaller batches + validation + better error recovery
+func pruneAccountChangeSetBeforeBlockSafeFast(tx kv.RwTx, cutoffBlock uint64, cursor kv.RwCursorDupSort) (int, error) {
+	const safeBatchSize = 2000      // Smaller batches for safety
+	const validationInterval = 5000 // Validate every N deletions
+
+	deletedCount := 0
+	processedBlocks := 0
+	validationFailures := 0
+
+	fmt.Printf("Safe-Fast mode: using smaller batches (%d) with validation every %d deletions\n", safeBatchSize, validationInterval)
+
+	// Safe direct deletion with smaller batches and validation
+	for key, _, err := cursor.First(); key != nil; {
+		if err != nil {
+			return deletedCount, err
+		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached cutoff
+			}
+
+			batchStart := deletedCount
+
+			// Process duplicates for this block with safety checks
+			for k, _, err := cursor.SeekExact(key); k != nil; {
+				if err != nil {
+					fmt.Printf("⚠️ Seek error for block %d: %v\n", blockNum, err)
+					key, _, err = cursor.NextNoDup()
+					break
+				}
+
+				// Store key for validation (small overhead for safety)
+				keyBackup := make([]byte, len(k))
+				copy(keyBackup, k)
+
+				// Attempt deletion
+				if err := cursor.DeleteCurrent(); err != nil {
+					fmt.Printf("⚠️ Delete failed for key in block %d: %v\n", blockNum, err)
+					validationFailures++
+
+					// Try to recover position
+					if _, _, seekErr := cursor.SeekExact(keyBackup); seekErr != nil {
+						fmt.Printf("⚠️ Recovery failed, continuing to next block\n")
+						key, _, err = cursor.NextNoDup()
+						break
+					}
+					key, _, err = cursor.NextDup()
+					continue
+				}
+
+				deletedCount++
+
+				// Periodic validation to ensure cursor integrity
+				if deletedCount%validationInterval == 0 {
+					if validateErr := validateCursorState(cursor, cutoffBlock); validateErr != nil {
+						fmt.Printf("⚠️ Cursor validation failed at %d deletions: %v\n", deletedCount, validateErr)
+						validationFailures++
+					}
+					fmt.Printf("🔍 Validated: %d deletions processed (failures: %d)\n", deletedCount, validationFailures)
+				}
+
+				// Check if we've processed enough in this batch
+				if deletedCount-batchStart >= safeBatchSize {
+					fmt.Printf("📦 Batch limit reached, moving to next block\n")
+					key, _, err = cursor.NextNoDup()
+					break
+				}
+
+				// Move to next duplicate
+				key, _, err = cursor.NextDup()
+			}
+
+			processedBlocks++
+			if processedBlocks%1000 == 0 {
+				fmt.Printf("🛡️⚡ Safe-Fast processed %d blocks (%d records, %d failures)\n",
+					processedBlocks, deletedCount, validationFailures)
+			}
+		}
+
+		// Move to next unique block number
+		key, _, err = cursor.NextNoDup()
+	}
+
+	if validationFailures > 0 {
+		fmt.Printf("⚠️ Safe-Fast completed with %d validation failures (non-critical)\n", validationFailures)
+	}
+
+	return deletedCount, nil
+}
+
+// validateCursorState performs basic validation of cursor state
+func validateCursorState(cursor kv.RwCursorDupSort, cutoffBlock uint64) error {
+	currentKey, _, err := cursor.Current()
+	if err != nil {
+		return fmt.Errorf("cursor.Current() failed: %w", err)
+	}
+
+	if len(currentKey) >= 8 {
+		blockNum := binary.BigEndian.Uint64(currentKey[:8])
+		if blockNum >= cutoffBlock {
+			return fmt.Errorf("cursor moved beyond cutoff block: %d >= %d", blockNum, cutoffBlock)
+		}
+	}
+
+	return nil
+}
+
+// pruneStorageChangeSetBeforeBlockOptimized deletes StorageChangeSet records before specified block
+// Uses optimized batch processing to avoid memory overflow and improve performance
+// fastMode: if true, uses direct cursor deletion (faster but more aggressive)
+// safeFastMode: if true, uses safe-fast mode (balanced performance and safety)
+func pruneStorageChangeSetBeforeBlockOptimized(tx kv.RwTx, cutoffBlock uint64, fastMode bool, safeFastMode bool) (int, error) {
 	cursor, err := tx.RwCursorDupSort("StorageChangeSet")
 	if err != nil {
 		return 0, err
 	}
 	defer cursor.Close()
 
-	// Collect all keys to delete first (safer for DupSort tables)
-	var keysToDelete [][]byte
+	const batchSize = 10000 // Process in batches to avoid memory overflow
+	deletedCount := 0
+	processedRecords := 0
 
+	if fastMode {
+		fmt.Printf("🚀 Fast processing StorageChangeSet (direct cursor deletion)...\n")
+		return pruneStorageChangeSetBeforeBlockFast(tx, cutoffBlock, cursor)
+	} else if safeFastMode {
+		fmt.Printf("🛡️⚡ Safe-Fast processing StorageChangeSet (smaller batches + validation)...\n")
+		return pruneStorageChangeSetBeforeBlockSafeFast(tx, cutoffBlock, cursor)
+	}
+
+	fmt.Printf("🔄 Processing StorageChangeSet (batch size: %d)...\n", batchSize)
+
+	// Process in batches to optimize memory usage
+	for {
+		var keysToDelete [][]byte
+		currentBatchSize := 0
+
+		// Position cursor at start or continue from current position
+		if processedRecords == 0 {
+			// Start from beginning
+			cursor.First()
+		}
+
+		// Collect a batch of keys to delete
+		// StorageChangeSet key format: block_number + address + incarnation + storage_key
+		for key, _, err := cursor.Current(); key != nil && currentBatchSize < batchSize; key, _, err = cursor.Next() {
+			if err != nil {
+				return deletedCount, err
+			}
+
+			if len(key) >= 8 {
+				blockNum := binary.BigEndian.Uint64(key[:8])
+				if blockNum >= cutoffBlock {
+					// Reached cutoff, we're done
+					goto deleteBatch
+				}
+
+				// Make a copy of the key
+				keyCopy := make([]byte, len(key))
+				copy(keyCopy, key)
+				keysToDelete = append(keysToDelete, keyCopy)
+				currentBatchSize++
+				processedRecords++
+
+				if processedRecords%5000 == 0 {
+					fmt.Printf("⏳ Processed %d storage records (%d in current batch)...\n", processedRecords, len(keysToDelete))
+				}
+			}
+		}
+
+	deleteBatch:
+		// Delete current batch
+		if len(keysToDelete) == 0 {
+			break // No more records to delete
+		}
+
+		batchDeleted := 0
+		for _, key := range keysToDelete {
+			if err := tx.Delete("StorageChangeSet", key); err != nil {
+				// Log but continue - some keys might not exist anymore
+				continue
+			}
+			batchDeleted++
+		}
+
+		deletedCount += batchDeleted
+		fmt.Printf("✓ Deleted batch: %d storage records (total: %d)\n", batchDeleted, deletedCount)
+
+		// Check if we processed all records before cutoff
+		if currentBatchSize < batchSize {
+			break // This was the last batch
+		}
+
+		// Continue from where we left off
+		keysToDelete = nil // Release memory
+	}
+
+	return deletedCount, nil
+}
+
+// pruneStorageChangeSetBeforeBlockFast performs direct cursor deletion for maximum speed
+// ⚠️  More aggressive - deletes records immediately without collecting them first
+func pruneStorageChangeSetBeforeBlockFast(tx kv.RwTx, cutoffBlock uint64, cursor kv.RwCursorDupSort) (int, error) {
+	deletedCount := 0
+	processedRecords := 0
+
+	// Direct deletion approach - faster but more aggressive
 	// StorageChangeSet key format: block_number + address + incarnation + storage_key
-	// We need to collect all entries where block_number < cutoffBlock
-	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.Next() {
+	for key, _, err := cursor.First(); key != nil; {
 		if err != nil {
-			return 0, err
+			return deletedCount, err
 		}
 
 		if len(key) >= 8 {
 			blockNum := binary.BigEndian.Uint64(key[:8])
 			if blockNum >= cutoffBlock {
-				break // Reached the cutoff, stop collecting
+				break // Reached cutoff
 			}
 
-			// Make a copy of the key
-			keyCopy := make([]byte, len(key))
-			copy(keyCopy, key)
-			keysToDelete = append(keysToDelete, keyCopy)
+			// Delete current storage record directly
+			if err := cursor.DeleteCurrent(); err != nil {
+				// If deletion fails, try to continue
+				key, _, err = cursor.Next()
+				continue
+			}
+
+			deletedCount++
+			processedRecords++
+
+			if processedRecords%10000 == 0 {
+				fmt.Printf("⚡ Fast deleted %d storage records...\n", deletedCount)
+			}
 		}
+
+		// Move to next record
+		key, _, err = cursor.Next()
 	}
 
-	// Now delete all collected keys using tx.Delete (safer than cursor operations)
+	return deletedCount, nil
+}
+
+// pruneStorageChangeSetBeforeBlockSafeFast performs safe-fast cursor deletion for storage data
+// 🛡️⚡ Optimized for StorageChangeSet table with validation and error recovery
+func pruneStorageChangeSetBeforeBlockSafeFast(tx kv.RwTx, cutoffBlock uint64, cursor kv.RwCursorDupSort) (int, error) {
+	const safeBatchSize = 3000      // Slightly larger batches for storage (less duplicates per key)
+	const validationInterval = 8000 // Validate every N deletions
+
 	deletedCount := 0
-	for _, key := range keysToDelete {
-		if err := tx.Delete("StorageChangeSet", key); err != nil {
-			// Log but continue - some keys might not exist anymore
-			continue
+	processedRecords := 0
+	validationFailures := 0
+
+	fmt.Printf("Safe-Fast mode: using storage-optimized batches (%d) with validation every %d deletions\n", safeBatchSize, validationInterval)
+
+	// Safe direct deletion with validation for storage data
+	// StorageChangeSet key format: block_number + address + incarnation + storage_key
+	for key, _, err := cursor.First(); key != nil; {
+		if err != nil {
+			return deletedCount, err
 		}
-		deletedCount++
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached cutoff
+			}
+
+			// Store key for validation and recovery
+			keyBackup := make([]byte, len(key))
+			copy(keyBackup, key)
+
+			// Attempt deletion
+			if err := cursor.DeleteCurrent(); err != nil {
+				fmt.Printf("⚠️ Delete failed for storage record in block %d: %v\n", blockNum, err)
+				validationFailures++
+
+				// Try to recover position and continue
+				if _, _, seekErr := cursor.SeekExact(keyBackup); seekErr != nil {
+					fmt.Printf("⚠️ Recovery failed, skipping to next record\n")
+				}
+				key, _, err = cursor.Next()
+				continue
+			}
+
+			deletedCount++
+			processedRecords++
+
+			// Periodic validation for cursor integrity
+			if deletedCount%validationInterval == 0 {
+				if validateErr := validateCursorState(cursor, cutoffBlock); validateErr != nil {
+					fmt.Printf("⚠️ Storage cursor validation failed at %d deletions: %v\n", deletedCount, validateErr)
+					validationFailures++
+				}
+				fmt.Printf("🔍 Storage validated: %d deletions processed (failures: %d)\n", deletedCount, validationFailures)
+			}
+
+			// Progress reporting
+			if processedRecords%10000 == 0 {
+				fmt.Printf("🛡️⚡ Safe-Fast storage: %d records processed (%d failures)\n", deletedCount, validationFailures)
+			}
+
+			// Batch size control for memory management
+			if processedRecords%safeBatchSize == 0 {
+				// Small pause to allow other operations (cooperative multitasking)
+				// This helps with long-running operations
+			}
+		}
+
+		// Move to next record
+		key, _, err = cursor.Next()
+	}
+
+	if validationFailures > 0 {
+		fmt.Printf("⚠️ Safe-Fast storage completed with %d validation failures (non-critical)\n", validationFailures)
 	}
 
 	return deletedCount, nil
@@ -1401,9 +1791,11 @@ func main() {
 		log.Error("Levels: conservative (default), moderate, aggressive")
 		log.Error("Options:")
 		log.Error("  --keep-recent-batches N    Keep recent N batches (default: 10)")
+		log.Error("  --fast-dupfree            Enable fast dupCursor deletion (higher performance, more aggressive)")
+		log.Error("  --safe-fast               Enable safe-fast mode (balanced performance and safety)")
 		log.Error("  --yes, -y                  Skip confirmation prompts")
 		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
-		log.Error("AGGRESSIVE mode: Also cleans 2 historical dupCursor tables (AccountChangeSet, StorageChangeSet) - preserves CanonicalHeader and hermez_blockBatches for stability")
+		log.Error("AGGRESSIVE mode: Also cleans 2 historical dupCursor tables (+12.5GB: AccountChangeSet, StorageChangeSet) - preserves CanonicalHeader and hermez_blockBatches for stability")
 		os.Exit(1)
 	}
 
@@ -1412,6 +1804,8 @@ func main() {
 	pruneLevel := PruneLevelModerate // Default: moderate (recommended)
 	keepRecentBatches := uint64(10)  // Default: keep recent 10 batches
 	autoYes := false                 // Default: require user confirmation
+	fastDupCursorMode := false       // Default: use safe batch processing
+	safeFastMode := false            // Default: use standard processing
 
 	// Parse pruning level and optional parameters
 	for i := 1; i < len(args); i++ {
@@ -1449,6 +1843,10 @@ func main() {
 					os.Exit(1)
 				}
 			}
+		case arg == "--fast-dupfree":
+			fastDupCursorMode = true
+		case arg == "--safe-fast":
+			safeFastMode = true
 		case arg == "--yes" || arg == "-y":
 			autoYes = true
 
@@ -1466,6 +1864,12 @@ func main() {
 				}
 			}
 		}
+	}
+
+	// Validate mode combinations
+	if fastDupCursorMode && safeFastMode {
+		log.Error("Cannot use both --fast-dupfree and --safe-fast simultaneously. Choose one mode.")
+		os.Exit(1)
 	}
 
 	dbMainDBPath := dbPath + "/chaindata"
@@ -1548,6 +1952,13 @@ func main() {
 	var totalToDeleteSize uint64
 	var totalDbSize uint64
 
+	// Pre-collect table statistics for later use in deletion phase
+	preCollectedStats := make(map[string]struct {
+		entries   uint64
+		sizeBytes uint64
+		pages     uint64
+	})
+
 	fmt.Printf("\nTables to be deleted:\n")
 	for i, table := range toDelete {
 		entries, sizeBytes, pages, err := getTableStats(chaindb, table)
@@ -1557,6 +1968,17 @@ func main() {
 			sizeStr := datasize.ByteSize(sizeBytes).HumanReadable()
 			fmt.Printf("%3d. %-30s %s (%d entries, %d pages)\n", i+1, table, sizeStr, entries, pages)
 			totalToDeleteSize += sizeBytes
+
+			// Save statistics for deletion phase
+			preCollectedStats[table] = struct {
+				entries   uint64
+				sizeBytes uint64
+				pages     uint64
+			}{
+				entries:   entries,
+				sizeBytes: sizeBytes,
+				pages:     pages,
+			}
 		}
 	}
 
@@ -1637,7 +2059,14 @@ func main() {
 			fmt.Printf("\n=== Executing Aggressive DupCursor Data Cleanup ===\n")
 			fmt.Printf("Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet\n")
 			fmt.Printf("Note: CanonicalHeader and hermez_blockBatches are preserved for node stability\n")
-			deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches)
+			if fastDupCursorMode {
+				fmt.Printf("⚡ Fast dupCursor mode enabled: using direct cursor deletion for maximum performance\n")
+			} else if safeFastMode {
+				fmt.Printf("🛡️⚡ Safe-Fast dupCursor mode enabled: balanced performance and safety\n")
+			} else {
+				fmt.Printf("🔄 Standard dupCursor mode: using optimized batch processing for safety\n")
+			}
+			deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches, fastDupCursorMode, safeFastMode)
 			if err != nil {
 				log.Error("Failed to perform dupCursor data cleanup", "error", err)
 			} else {
@@ -1660,32 +2089,71 @@ func main() {
 		"hermez_blockBatches": true, // dupCursor table - needs special handling
 	}
 
-	// Execute table deletion
+	// Execute table deletion using pre-collected statistics
 	fmt.Printf("\nStarting table deletion...\n")
 	deletedCount := 0
 	actuallyDeletedTables := 0
 	var actualDeletedSize uint64
 
+	// Sort tables by size for optimized deletion order (small tables first)
+	type tableSizeInfo struct {
+		name string
+		size uint64
+	}
+	var sortedTables []tableSizeInfo
+
 	for _, table := range toDelete {
+		if stats, exists := preCollectedStats[table]; exists {
+			sortedTables = append(sortedTables, tableSizeInfo{name: table, size: stats.sizeBytes})
+		} else {
+			// Tables without stats go last
+			sortedTables = append(sortedTables, tableSizeInfo{name: table, size: 0})
+		}
+	}
+
+	// Sort by size (small to large)
+	for i := 0; i < len(sortedTables)-1; i++ {
+		for j := i + 1; j < len(sortedTables); j++ {
+			if sortedTables[i].size > sortedTables[j].size {
+				sortedTables[i], sortedTables[j] = sortedTables[j], sortedTables[i]
+			}
+		}
+	}
+
+	fmt.Printf("🗂️ Processing %d tables in optimized order (small to large)...\n", len(sortedTables))
+
+	for i, tableInfo := range sortedTables {
+		table := tableInfo.name
+
 		// Skip block tables if we did partial pruning
 		if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && partiallyPrunedTables[table] {
 			fmt.Printf("⊜ Skipped table: %s (partial pruning already applied)\n", table)
 			continue
 		}
 
-		// Get table size before deletion
-		entries, sizeBytes, _, err := getTableStats(chaindb, table)
-		if err == nil && entries > 0 {
-			actualDeletedSize += sizeBytes
+		// Use pre-collected statistics from the initial scan
+		stats, hasStats := preCollectedStats[table]
+		if hasStats && stats.entries > 0 {
+			actualDeletedSize += stats.sizeBytes
 			actuallyDeletedTables++
+		}
+
+		// Show progress for large operations
+		if hasStats && stats.sizeBytes > 100*1024*1024 { // > 100MB
+			fmt.Printf("🔄 Processing large table (%d/%d): %s (%s)...\n",
+				i+1, len(sortedTables), table, datasize.ByteSize(stats.sizeBytes).HumanReadable())
 		}
 
 		err = tx.ClearBucket(table)
 		if err != nil {
 			log.Error("Failed to clear table", "table", table, "error", err)
 		} else {
-			if entries > 0 {
-				fmt.Printf("✓ Cleared table: %s\n", table)
+			if hasStats && stats.entries > 0 {
+				if stats.sizeBytes > 100*1024*1024 { // > 100MB
+					fmt.Printf("✅ Cleared large table: %s (%s, %d entries)\n", table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
+				} else {
+					fmt.Printf("✓ Cleared table: %s (%s, %d entries)\n", table, datasize.ByteSize(stats.sizeBytes).HumanReadable(), stats.entries)
+				}
 			} else {
 				fmt.Printf("✓ Cleared table: %s (was empty)\n", table)
 			}

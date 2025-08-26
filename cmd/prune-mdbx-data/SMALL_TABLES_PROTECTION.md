@@ -92,7 +92,7 @@ All Modes: 🛡️ Protected (preserved for stability)
 ### Space Savings Impact (DupCursor Tables)
 - **Before**: Could save ~2.3GB from CanonicalHeader + hermez_blockBatches in Aggressive mode
 - **After**: 0GB saved from these tables (preserved for stability)
-- **Net Impact**: Aggressive mode saves ~10GB less but gains critical stability
+- **Net Impact**: Aggressive mode still saves +12.5GB over Moderate mode from AccountChangeSet + StorageChangeSet historical data
 
 ### Risk Reduction
 - **Before**: Small risk of breaking edge-case functionality (small tables) + High risk of node crashes (dupCursor tables)
