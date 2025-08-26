@@ -611,10 +611,11 @@ func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
 }
 
 // pruneHistoricalDupCursorData performs aggressive cleanup of historical dupCursor table data
-// (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)
+// (AccountChangeSet, StorageChangeSet only - CanonicalHeader and hermez_blockBatches are preserved)
 // while preserving recent batches for operational needs
 func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, error) {
 	fmt.Printf("Starting historical dupCursor data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
+	fmt.Printf("Note: Only processing AccountChangeSet and StorageChangeSet - CanonicalHeader and hermez_blockBatches preserved for node stability\n")
 
 	// Get the range of blocks to delete (everything except recent batches)
 	latestBlock, err := getLatestBlockNumber(tx)
@@ -669,21 +670,8 @@ func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, er
 	deletedRecords += storageDeletedCount
 	fmt.Printf("✓ Deleted %d StorageChangeSet records\n", storageDeletedCount)
 
-	// Clean CanonicalHeader data (dupCursor table)
-	canonicalHeaderDeletedCount, err := pruneCanonicalHeaderBeforeBlock(tx, cutoffBlock)
-	if err != nil {
-		return deletedRecords, fmt.Errorf("failed to prune CanonicalHeader: %w", err)
-	}
-	deletedRecords += canonicalHeaderDeletedCount
-	fmt.Printf("✓ Deleted %d CanonicalHeader records\n", canonicalHeaderDeletedCount)
-
-	// Clean hermez_blockBatches data (dupCursor table)
-	hermezBlockBatchesDeletedCount, err := pruneHermezBlockBatchesBeforeBlock(tx, cutoffBlock)
-	if err != nil {
-		return deletedRecords, fmt.Errorf("failed to prune hermez_blockBatches: %w", err)
-	}
-	deletedRecords += hermezBlockBatchesDeletedCount
-	fmt.Printf("✓ Deleted %d hermez_blockBatches records\n", hermezBlockBatchesDeletedCount)
+	// Note: CanonicalHeader and hermez_blockBatches are NOT processed here
+	// These tables are critical for node operation and are preserved for stability
 
 	return deletedRecords, nil
 }
@@ -1415,7 +1403,7 @@ func main() {
 		log.Error("  --keep-recent-batches N    Keep recent N batches (default: 10)")
 		log.Error("  --yes, -y                  Skip confirmation prompts")
 		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
-		log.Error("AGGRESSIVE mode: Also cleans 4 historical dupCursor tables (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)")
+		log.Error("AGGRESSIVE mode: Also cleans 2 historical dupCursor tables (AccountChangeSet, StorageChangeSet) - preserves CanonicalHeader and hermez_blockBatches for stability")
 		os.Exit(1)
 	}
 
@@ -1596,9 +1584,9 @@ func main() {
 	case PruneLevelAggressive:
 		fmt.Printf("Aggressive pruning: Maximum cleanup including historical dupCursor data\n")
 		fmt.Printf("Strategy: All moderate mode deletions + historical dupCursor table cleanup\n")
-		fmt.Printf("DupCursor tables processed: AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches\n")
-		fmt.Printf("Preserves: Recent %d batches of dupCursor data, SMT data, core operational tables\n", keepRecentBatches)
-		fmt.Printf("Deletes: Same as moderate + historical dupCursor data beyond recent batches\n")
+		fmt.Printf("DupCursor tables processed: AccountChangeSet, StorageChangeSet (CanonicalHeader and hermez_blockBatches preserved for stability)\n")
+		fmt.Printf("Preserves: Recent %d batches of dupCursor data, SMT data, core operational tables, critical mapping tables\n", keepRecentBatches)
+		fmt.Printf("Deletes: Same as moderate + historical account/storage changes beyond recent batches\n")
 		fmt.Printf("Note: PlainState (current state) is always preserved as it contains active account/storage data\n")
 		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical queries not needed\n")
 		fmt.Printf("🚀 Maximum space savings: Optimized for nodes with complete SMT and limited historical query needs\n")
@@ -1647,7 +1635,8 @@ func main() {
 		// Additional aggressive mode: clean historical dupCursor data
 		if pruneLevel == PruneLevelAggressive {
 			fmt.Printf("\n=== Executing Aggressive DupCursor Data Cleanup ===\n")
-			fmt.Printf("Processing 4 dupCursor tables: AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches\n")
+			fmt.Printf("Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet\n")
+			fmt.Printf("Note: CanonicalHeader and hermez_blockBatches are preserved for node stability\n")
 			deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches)
 			if err != nil {
 				log.Error("Failed to perform dupCursor data cleanup", "error", err)

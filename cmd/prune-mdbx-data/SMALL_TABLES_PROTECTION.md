@@ -1,8 +1,8 @@
-# Small Tables Protection Strategy
+# Table Protection Strategy
 
 ## Overview
 
-This document explains the strategy for protecting small database tables from cleanup operations in X Layer Erigon pruning tools.
+This document explains the strategy for protecting database tables from cleanup operations in X Layer Erigon pruning tools, including both small tables and critical dupCursor tables.
 
 ## Protected Small Tables
 
@@ -16,18 +16,34 @@ The following 5 tables are **permanently protected** from all pruning operations
 | **HeadersTotalDifficulty** | 8.0 KB | Chain total difficulty | Tiny size, chain metadata |
 | **MaxTxNum** | 8.0 KB | Maximum transaction number | Tiny size, transaction metadata |
 
+## Protected DupCursor Tables (Node Stability)
+
+The following 2 dupCursor tables are **protected in Aggressive mode** for node stability:
+
+| Table Name | Size | Description | Rationale |
+|------------|------|-------------|-----------|
+| **CanonicalHeader** | 1.5 GB | Canonical chain headers | Critical for chain state and node startup |
+| **hermez_blockBatches** | 779.6 MB | L2 block to batch mappings | Essential for sequence execution |
+
 ## Protection Strategy
 
-### Why These Tables Are Protected
+### Why Small Tables Are Protected
 
 1. **Minimal Space Impact**: Combined size < 10MB, negligible cleanup benefit
 2. **Safety First**: Preserving small tables eliminates any risk of breaking functionality
 3. **Development Efficiency**: Reduces complexity in pruning logic
 4. **User Request**: Explicitly requested by development team
 
+### Why DupCursor Tables Are Protected
+
+1. **Node Stability**: CanonicalHeader deletion breaks chain state recognition
+2. **Sequence Execution**: hermez_blockBatches deletion causes "nil pointer dereference" errors
+3. **Critical Mappings**: These provide essential L2 operation mappings
+4. **Stability Over Space**: ~2.3GB preserved to ensure reliable node operation
+
 ### Implementation Details
 
-#### Code Changes
+#### Code Changes for Small Tables
 - Added to `getCriticalTables()` function as protected tables
 - Removed from all pruning logic functions:
   - `copyBlockData()`: Excluded from batch operations
@@ -35,30 +51,53 @@ The following 5 tables are **permanently protected** from all pruning operations
   - `deleteBlockData()`: Excluded from legacy deletion
   - `deleteCompositeKeyData()`: HeadersTotalDifficulty excluded
 
+#### Code Changes for DupCursor Tables
+- **CanonicalHeader** and **hermez_blockBatches**:
+  - Removed from batch-processing functions to avoid cursor type conflicts
+  - Excluded from `pruneHistoricalDupCursorData()` in Aggressive mode
+  - Added to `partiallyPrunedTables` to prevent full deletion
+  - Preserved existing dupCursor processing functions but disabled their usage
+
 #### Before/After Behavior
 
-**Before (Previous Behavior)**:
+**Small Tables - Before (Previous Behavior)**:
 ```
 Moderate Mode: 🔄 Batch-based pruning
 Aggressive Mode: 🔄 Batch-based pruning  
 ```
 
-**After (Current Behavior)**:
+**Small Tables - After (Current Behavior)**:
 ```
 All Modes: 🛡️ Protected (never touched)
 ```
 
+**DupCursor Tables - Before (Previous Behavior)**:
+```
+Moderate Mode: 🛡️ Protected
+Aggressive Mode: 🔄 DupCursor-based pruning (caused node crashes)
+```
+
+**DupCursor Tables - After (Current Behavior)**:
+```
+All Modes: 🛡️ Protected (preserved for stability)
+```
+
 ## Impact Analysis
 
-### Space Savings Impact
-- **Before**: Could save ~10MB total from these 5 tables
-- **After**: 0MB saved from these tables
+### Space Savings Impact (Small Tables)
+- **Before**: Could save ~10MB total from 5 small tables
+- **After**: 0MB saved from small tables
 - **Net Impact**: Negligible (<0.01% of typical database size)
 
+### Space Savings Impact (DupCursor Tables)
+- **Before**: Could save ~2.3GB from CanonicalHeader + hermez_blockBatches in Aggressive mode
+- **After**: 0GB saved from these tables (preserved for stability)
+- **Net Impact**: Aggressive mode saves ~10GB less but gains critical stability
+
 ### Risk Reduction
-- **Before**: Small risk of breaking edge-case functionality
-- **After**: Zero risk from these tables
-- **Benefit**: Higher safety margin with negligible space trade-off
+- **Before**: Small risk of breaking edge-case functionality (small tables) + High risk of node crashes (dupCursor tables)
+- **After**: Zero risk from protected tables
+- **Benefit**: Higher safety margin with minor space trade-off, eliminates critical node startup failures
 
 ### Code Maintenance
 - **Before**: Complex logic handling small tables in multiple functions
@@ -100,12 +139,13 @@ To remove protection from any of these tables:
 
 ## Configuration
 
-These tables are **hard-coded** as protected. There is no configuration option to change this behavior.
+Both small tables and dupCursor tables are **hard-coded** as protected. There is no configuration option to change this behavior.
 
 ### Rationale for Hard-Coding
 - **Simplicity**: No configuration complexity
-- **Safety**: Prevents accidental enabling of risky operations
-- **User Intent**: Explicit request was to never clean these tables
+- **Safety**: Prevents accidental enabling of risky operations (especially for dupCursor tables)
+- **User Intent**: Explicit request was to never clean small tables, and stability issues forced protection of dupCursor tables
+- **Node Stability**: DupCursor table protection is mandatory to prevent runtime crashes
 
 ## Testing Verification
 
@@ -115,15 +155,22 @@ To verify protection is working:
 # Run pruning and check these tables are never mentioned in deletion logs
 ./prune-tool prune-chaindata /path/to/datadir aggressive --yes
 
-# Check logs should NOT contain:
+# Check logs should NOT contain (small tables):
 # - "Clearing table: block_l1_info_tree_index"
 # - "Clearing table: plain_state_version"  
 # - "Clearing table: smt_depths"
 # - "Clearing table: HeadersTotalDifficulty"
 # - "Clearing table: MaxTxNum"
 
+# Check logs should NOT contain (dupCursor tables):
+# - "Processing 4 dupCursor tables: AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches"
+# - "✓ Deleted X CanonicalHeader records"
+# - "✓ Deleted X hermez_blockBatches records"
+
 # Instead should see:
-# - "⊜ Skipped table: ... (small table protection)"
+# - "⊜ Skipped table: ... (small table protection)"  (for small tables)
+# - "Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet" (for Aggressive mode)
+# - "Note: CanonicalHeader and hermez_blockBatches are preserved for node stability"
 ```
 
 ## Related Documentation
@@ -135,4 +182,4 @@ To verify protection is working:
 ---
 
 **Last Updated**: December 2024  
-**Change Reason**: User request to protect small tables from cleanup operations
+**Change Reason**: User request to protect small tables + Node stability issues requiring dupCursor table protection

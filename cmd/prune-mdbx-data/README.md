@@ -21,11 +21,11 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 
 ### 🧹 Data Pruning (`prune-chaindata`) 
 - **Moderate mode (default)**: Comprehensive cleanup with batch retention (~52-57GB savings)  
-- **Aggressive mode**: Maximum cleanup including historical dupCursor data (~62-67GB savings)
+- **Aggressive mode**: Maximum cleanup including historical state data (~52-57GB savings)
 - **Batch-based optimization**: Keeps recent zkEVM batches for operational needs
 - **zkEVM table protection**: Automatically protects critical SMT and sequencer tables
 - **Small table protection**: 5 small tables never cleaned (block_l1_info_tree_index, plain_state_version, smt_depths, HeadersTotalDifficulty, MaxTxNum)
-- **DupCursor handling**: Specialized processing for 4 dupCursor tables in Aggressive mode
+- **DupCursor handling**: Specialized processing for 2 dupCursor tables (AccountChangeSet, StorageChangeSet) in Aggressive mode
 - **Copy-Truncate-Restore optimization**: Dramatically faster pruning by preserving recent data instead of deleting old data
 - **Safe alternative**: Use `compact-db` for zero-risk cleanup (~30-35% savings)
 
@@ -47,7 +47,7 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 # Moderate (default recommended, ~52-57GB savings)  
 ./prune-tool prune-chaindata /path/to/datadir moderate --keep-recent-batches=10
 
-# Aggressive (maximum, ~62-67GB savings)
+# Aggressive (maximum, ~52-57GB savings, preserves critical mapping tables)
 ./prune-tool prune-chaindata /path/to/datadir aggressive --keep-recent-batches=5
 
 # Safe alternative: Database compaction (zero risk, ~30-35% savings)
@@ -136,7 +136,7 @@ Analyzes database structure and provides detailed statistics.
 - **Small tables**: 5 small tables are never cleaned regardless of mode (data size < 10MB each)
   - `block_l1_info_tree_index`, `plain_state_version`, `smt_depths`, `HeadersTotalDifficulty`, `MaxTxNum`
 - **Critical tables**: SMT, zkEVM operational, system configuration tables
-- **DupCursor tables**: Special handling in aggressive mode (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)
+- **DupCursor tables**: Special handling in aggressive mode (AccountChangeSet, StorageChangeSet processed; CanonicalHeader, hermez_blockBatches preserved for stability)
 
 **Options:**
 - `--keep-recent-batches=N`: Keep N most recent batches (default: 10)
@@ -195,9 +195,9 @@ Analyzes database structure and provides detailed statistics.
 |-----------|------------------|-------------------------------|-----------|-------|
 | **Compaction Only** | 30-35% | ~55GB from 182GB | SMT: ~49GB, Chaindata: ~6GB | Zero risk, reclaims freelist space |
 | **Moderate Pruning** | 29-31% | ~52-57GB from 182GB | Chaindata table deletion only | Requires compaction to reclaim space |
-| **Aggressive Pruning** | 34-37% | ~62-67GB from 182GB | Moderate + historical state cleanup | Requires compaction to reclaim space |  
+| **Aggressive Pruning** | 29-31% | ~52-57GB from 182GB | Moderate + historical state cleanup | Requires compaction to reclaim space |  
 | **Moderate + Compaction** | 59-62% | ~107-112GB from 182GB | ~52-57GB + ~55GB compaction | Best balance of safety and savings |
-| **Aggressive + Compaction** | 64-67% | ~117-122GB from 182GB | ~62-67GB + ~55GB compaction | Maximum practical savings |
+| **Aggressive + Compaction** | 59-62% | ~107-112GB from 182GB | ~52-57GB + ~55GB compaction | Maximum practical savings with stability |
 
 ### Key Insights
 - **🔍 SMT compaction is the biggest win**: ~49GB (46% of SMT file size) due to historical operations leaving massive freelist

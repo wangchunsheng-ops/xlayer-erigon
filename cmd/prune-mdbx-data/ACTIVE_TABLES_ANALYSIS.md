@@ -35,7 +35,7 @@ Based on real mainnet data analysis:
 | **BlockBody** | 1.7 GB | Block body data (uncle hashes, etc) | 🔄 | 🔄 |
 | **TxSender** | 1.7 GB | Transaction sender addresses | 🔄 | 🔄 |
 | **block_info_roots** | 1.5 GB | zkEVM block info roots | 🔄 | 🔄 |
-| **CanonicalHeader** | 1.5 GB | Canonical chain headers | 🛡 | 🔄 |
+| **CanonicalHeader** | 1.5 GB | Canonical chain headers | 🛡️ | 🛡️ |
 
 ### 🟡 Medium Tables (100MB-1GB) - Secondary Targets
 
@@ -43,7 +43,7 @@ Based on real mainnet data analysis:
 |------------|------|-------------|----------|------------|
 | **BlockTransactionLookup** | 896.0 MB | Transaction hash to block mapping | ✅ | ✅ |
 | **hermez_txPricePercentage** | 854.5 MB | Transaction price percentages | ✅ | ✅ |
-| **hermez_blockBatches** | 779.6 MB | Block to batch mappings | 🛡️ | 🔄 |
+| **hermez_blockBatches** | 779.6 MB | Block to batch mappings | 🛡️ | 🛡️ |
 | **Receipt** | 711.0 MB | Transaction receipts | 🔄 | 🔄 |
 | **LogTopicIndex** | 600.6 MB | Event log topic index | ✅ | ✅ |
 | **batch_blocks** | 303.6 MB | Batch to block relationships | 🛡️ | 🛡️ |
@@ -117,12 +117,13 @@ Based on real mainnet data analysis:
 - ✅ Protects: All SMT data, current state, essential indexes
 - **Safe for**: Sequencer nodes, recent RPC queries
 
-### Aggressive Mode (~62-67GB savings)
-**Strategy**: Maximum cleanup including historical data
+### Aggressive Mode (~52-57GB savings)
+**Strategy**: Maximum cleanup including historical state data (with stability protection)
 - ✅ Removes: Moderate targets + AccountChangeSet + StorageChangeSet history
+- 🛡️ Preserves: CanonicalHeader + hermez_blockBatches for node stability
 - ✅ Logic: SMT contains complete state, historical changesets redundant
 - ⚠️ **Trade-off**: Some historical RPC queries may fail
-- **Best for**: Space-constrained environments, non-archival nodes
+- **Best for**: Space-constrained environments, non-archival nodes requiring stability
 
 ## Critical Protection Rules
 
@@ -166,8 +167,9 @@ This inconsistency caused data integrity issues where header lookups could fail.
 ### Aggressive Mode
 - **Tables Deleted**: All Moderate mode deletions PLUS:
   - ✅* **Historical State Cleanup** (2 tables, ~12.5 GB): AccountChangeSet, StorageChangeSet (historical data beyond recent batches)
-- **Space Saved**: ~62-67 GB  
-- **Strategy**: Maximum space optimization, some historical queries may fail
+  - 🛡️ **Preserved for Stability** (2 tables, ~2.3 GB): CanonicalHeader, hermez_blockBatches (critical for node operation)
+- **Space Saved**: ~52-57 GB  
+- **Strategy**: Maximum space optimization with stability protection, some historical queries may fail
 
 ### Conditionally Pruned Tables
 1. **Large Block Data**: Pruned by batch, keeping recent data (moderate+)
@@ -204,7 +206,7 @@ This inconsistency caused data integrity issues where header lookups could fail.
 ./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
 ./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
 
-# Expected total savings: ~117-122 GB (62-67GB from pruning + 55GB from compaction)
+# Expected total savings: ~107-112 GB (52-57GB from pruning + 55GB from compaction)
 ```
 
 ## Key Insights
@@ -212,21 +214,21 @@ This inconsistency caused data integrity issues where header lookups could fail.
 1. **SMT Database** has massive compaction potential (46% fragmentation)
 2. **Header table** (17.1GB) is now prunable in batch-based mode  
 3. **Historical ChangeSets** (12.5GB total) can be safely removed in aggressive mode
-4. **Combined approach** (prune + compact) can save 117-122GB from original 182GB (64-67%)
+4. **Combined approach** (prune + compact) can save 107-112GB from original 182GB (59-62%)
 5. **zkEVM tables** require special protection but many are small
 
 ## Quick Reference Table
 
 | Mode | Direct Deletions | Batch-Based Pruning (🔄) | Historical Cleanup | Total Space Saved |
 |------|------------------|--------------------------|-------------------|-------------------|
-| **Moderate (Recommended)** | 9 tables (~8.5 GB) | 15 tables (~47+ GB) | None | ~52-57 GB |
-| **Aggressive** | 9 tables (~8.5 GB) | 15 tables (~47+ GB) | 2 tables* (~12.5 GB) | ~62-67 GB |
+| **Moderate (Recommended)** | 9 tables (~8.5 GB) | 10 tables (~45 GB) | None | ~52-57 GB |
+| **Aggressive** | 9 tables (~8.5 GB) | 10 tables (~45 GB) | 2 tables* (~12.5 GB) | ~52-57 GB |
 
 **Notes:**
 - *Historical cleanup = only removes historical data beyond recent batches
 - Batch-based pruning preserves recent N batches (default: 10)  
 - All modes preserve SMT data and critical zkEVM operational tables
 - **⚠️ Important**: Table deletion does NOT immediately reduce file size - requires `compact-db` to reclaim space
-- **Real-world impact**: Pruning alone = ~29-37% savings, Pruning + Compaction = ~59-67% savings (from 182GB total)
+- **Real-world impact**: Pruning alone = ~29-31% savings, Pruning + Compaction = ~59-62% savings (from 182GB total)
 
 This analysis enables targeted, safe database optimization while preserving zkEVM functionality.
