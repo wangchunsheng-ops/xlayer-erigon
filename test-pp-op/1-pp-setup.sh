@@ -1,6 +1,12 @@
 set -e
 set -x
 
+if ! [ -f "example.env" ]; then
+  echo "example.env not found. You may need to run 'git checkout example.env'"
+  exit 1
+fi
+cp example.env .env
+
 source .env
 
 if [ "$CHECK_TYPE" == "mainnet" ]; then

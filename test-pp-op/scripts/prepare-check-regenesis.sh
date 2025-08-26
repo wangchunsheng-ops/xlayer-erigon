@@ -9,7 +9,7 @@ TMP_DIR="$TEST_DIR/tmp"
 SA_BENCH_DIR="$TMP_DIR/SA-Benchmark"
 
 SEQ_NAME="xlayer-seq"
-SLEEP_TIME=5
+SLEEP_TIME=10
 DATA_DIR="data"
 EXENV_FILE="example.env"
 TX_VALUE=10

@@ -13,6 +13,7 @@ build_patched_zkevm_bridge_service_image() {
   echo "build patched zkevm bridge service image"
   PWD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   rm -rf $PWD_DIR/tmp/zkevm-bridge-service
+  mkdir -p $PWD_DIR/tmp
   cd $PWD_DIR/tmp/
   git clone -b v0.6.0-RC16 https://github.com/0xPolygon/zkevm-bridge-service.git
     # it has docker file
