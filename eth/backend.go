@@ -137,6 +137,7 @@ import (
 	"github.com/ledgerwatch/erigon/zk/realtime"
 	realtimeCache "github.com/ledgerwatch/erigon/zk/realtime/cache"
 	realtimeKafka "github.com/ledgerwatch/erigon/zk/realtime/kafka"
+	"github.com/ledgerwatch/erigon/zk/realtime/realtimeapi"
 	realtimeSub "github.com/ledgerwatch/erigon/zk/realtime/subscription"
 	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
 	zkStages "github.com/ledgerwatch/erigon/zk/stages"
@@ -259,9 +260,9 @@ type Ethereum struct {
 	kafkaProducer *realtimeKafka.KafkaProducer
 	kafkaConsumer *realtimeKafka.KafkaConsumer
 	realtimeCache *realtimeCache.RealtimeCache
-	blockInfoChan chan *realtimeTypes.BlockInfo
-	txInfoChan    chan *state.TxInfo
-	finishChan    chan uint64
+	blockInfoChan chan *types.Header
+	txInfoChan    chan state.TxInfo
+	finishChan    chan realtimeTypes.FinishedEntry
 	realtimeSub   *realtimeSub.RealtimeSubscription
 }
 
@@ -1081,6 +1082,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 
 		// entering ZK territory!
 		cfg := backend.config
+		vm.InitEnvConfig(cfg.Zk.AddressRollup)
 
 		// For X Layer
 		if len(cfg.XLayer.Nacos.URLs) > 0 {
@@ -1234,15 +1236,15 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 
 			// For X Layer, realtime
 			if cfg.Zk.XLayer.Realtime.Enable {
-				kafkaProducer, err := realtimeKafka.NewKafkaProducer(cfg.Zk.XLayer.Realtime.Kafka)
+				kafkaProducer, err := realtimeKafka.NewKafkaProducer(cfg.Zk.XLayer.Realtime.Kafka, backend.sentryCtx, backend.chainDB)
 				if err != nil {
 					backend.kafkaEnabled = false
 					log.Warn("[Realtime] Failed to initialize kafka producer", "error", err)
 				} else {
 					backend.kafkaEnabled = true
 					backend.kafkaProducer = kafkaProducer
-					backend.blockInfoChan = make(chan *realtimeTypes.BlockInfo, realtimeKafka.DefaultKafkaBufferSize)
-					backend.txInfoChan = make(chan *state.TxInfo, realtimeKafka.DefaultKafkaBufferSize)
+					backend.blockInfoChan = make(chan *types.Header, realtimeKafka.DefaultKafkaBufferSize)
+					backend.txInfoChan = make(chan state.TxInfo, realtimeKafka.DefaultKafkaBufferSize)
 
 					// Send error trigger message on sequencer restart
 					if err := backend.kafkaProducer.SendKafkaErrorTrigger(0); err != nil {
@@ -1315,13 +1317,50 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 						return nil, err
 					}
 
-					backend.finishChan = make(chan uint64)
+					backend.finishChan = make(chan realtimeTypes.FinishedEntry)
 
 					if cfg.Zk.XLayer.Realtime.EnableSubscribe {
 						backend.realtimeSub = realtimeSub.NewRealtimeSubscription()
 						backend.realtimeSub.Start(ctx)
 					}
 				}
+			}
+			var l1BlockSyncer *syncer.L1Syncer
+			var sequencerL1Syncer *syncer.L1Syncer
+			if cfg.Zk.XLayer.SyncSeqLogs {
+				l1BlockSyncer = syncer.NewL1Syncer(
+					ctx,
+					ethermanClients,
+					[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+					[][]libcommon.Hash{{
+						contracts.SequenceBatchesTopic,
+					}},
+					cfg.L1BlockRange,
+					cfg.L1QueryDelay,
+					cfg.L1HighestBlockType,
+					cfg.Zk.XLayer.GetLogsTimeout,
+					cfg.Zk.XLayer.GetLogsRetries,
+				)
+
+				sequencerL1Syncer = syncer.NewL1Syncer(
+					ctx,
+					ethermanClients,
+					[]libcommon.Address{cfg.AddressZkevm, cfg.AddressRollup},
+					[][]libcommon.Hash{{
+						contracts.InitialSequenceBatchesTopic,
+						contracts.AddNewRollupTypeTopic,
+						contracts.AddNewRollupTypeTopicBanana,
+						contracts.CreateNewRollupTopic,
+						contracts.UpdateRollupTopic,
+					}},
+					cfg.L1BlockRange,
+					cfg.L1QueryDelay,
+					cfg.L1HighestBlockType,
+					cfg.Zk.XLayer.GetLogsTimeout,
+					cfg.Zk.XLayer.GetLogsRetries,
+				)
+
+				log.Info("RPC node: Created dedicated Sequencer L1 syncer for event pre-synchronization")
 			}
 
 			backend.syncStages = stages2.NewDefaultZkStages(
@@ -1337,6 +1376,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.forkValidator,
 				backend.engine,
 				backend.l1Syncer,
+				l1BlockSyncer,     // Added: RPC node specific Sequencer L1 syncer
+				sequencerL1Syncer, // Added: RPC node specific Sequencer L1 syncer
 				streamClient,
 				dataStreamServer,
 				l1InfoTreeUpdater,
@@ -1461,7 +1502,7 @@ func (s *Ethereum) Init(stack *node.Node, config *ethconfig.Config, chainConfig 
 
 	var gpCache *jsonrpc.GasPriceCache
 	// For X Layer, split db
-	s.apiList, gpCache = jsonrpc.APIList(chainKv, s.smtDB, ethRpcClient, txPoolRpcClient, s.txPool2, miningRpcClient, ff, stateCache, blockReader, s.agg, &httpRpcCfg, s.engine, config, s.l1Syncer, s.logger, dataStreamServer, s.gasTracker, s.stagedSync.GetCache(), config.Zk.XLayer.Realtime.Enable && s.kafkaEnabled, s.realtimeCache, s.realtimeSub)
+	s.apiList, gpCache = jsonrpc.APIList(chainKv, s.smtDB, ethRpcClient, txPoolRpcClient, s.txPool2, miningRpcClient, ff, stateCache, blockReader, s.agg, &httpRpcCfg, s.engine, config, s.l1Syncer, s.logger, dataStreamServer, s.gasTracker, s.stagedSync.GetCache(), config.Zk.XLayer.Realtime.Enable && s.kafkaEnabled, s.realtimeCache, s.realtimeSub, realtimeapi.NewRealtimeAPI, realtimeapi.NewRealtimeDebugApi)
 
 	// For X Layer
 	if s.txPool2 != nil && gpCache != nil {
@@ -1532,6 +1573,55 @@ func (s *Ethereum) PreStart() error {
 		// so here we loop and take a brief pause waiting for it to be ready
 		attempts := 0
 		dataStreamServer := dataStreamServerFactory.CreateDataStreamServer(s.streamServer, s.chainConfig.ChainID.Uint64())
+		for {
+			_, err = zkStages.CatchupDatastream(s.sentryCtx, "stream-catchup", tx, dataStreamServer)
+			if err != nil {
+				if errors.Is(err, datastreamer.ErrAtomicOpNotAllowed) {
+					attempts++
+					if attempts == 10 {
+						return err
+					}
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				return err
+			} else {
+				break
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	// For X Layer, unwind data stream to block number if needed
+	if s.config.Zk.XLayer.DataStreamUnwindToBlock > 0 {
+		log.Info("Unwinding data stream to block number", "blockNumber", s.config.Zk.XLayer.DataStreamUnwindToBlock)
+		tx, err := s.chainDB.BeginRw(context.Background())
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		reader := hermez_db.NewHermezDbReader(tx)
+
+		dataStreamServer := dataStreamServerFactory.CreateDataStreamServer(s.streamServer, s.chainConfig.ChainID.Uint64())
+
+		from := s.config.Zk.XLayer.DataStreamUnwindToBlock
+		latestbatchNum, err := reader.GetBatchNoByL2Block(from - 1)
+		if err != nil && !errors.Is(err, hermez_db.ErrorNotStored) {
+			return err
+		}
+
+		batchNum, err := reader.GetBatchNoByL2Block(from)
+		if err != nil && !errors.Is(err, hermez_db.ErrorNotStored) {
+			return err
+		}
+
+		if err = dataStreamServer.UnwindIfNecessary("DataStreamUnwindToBlock", reader, from, latestbatchNum, batchNum); err != nil {
+			return err
+		}
+
+		attempts := 0
 		for {
 			_, err = zkStages.CatchupDatastream(s.sentryCtx, "stream-catchup", tx, dataStreamServer)
 			if err != nil {

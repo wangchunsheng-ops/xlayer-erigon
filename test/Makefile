@@ -5,6 +5,7 @@ DOCKER_BRIDGE_UI := xlayer-bridge-ui
 DOCKER_APPROVE := xlayer-approve
 DOCKER_SEQ := xlayer-seq
 DOCKER_RPC := xlayer-rpc
+DOCKER_RPC_2 := xlayer-rpc-2
 DOCKER_L1_NETWORK := xlayer-mock-l1-network
 DOCKER_POOL_DB := xlayer-pool-db
 DOCKER_POOL_MANAGER := xlayer-pool-manager
@@ -28,6 +29,7 @@ RUN_DOCKER_BRIDGE_UI := $(DOCKER_COMPOSE) up -d $(DOCKER_BRIDGE_UI)
 RUN_DOCKER_APPROVE := $(DOCKER_COMPOSE) up -d $(DOCKER_APPROVE)
 RUN_DOCKER_SEQ := $(DOCKER_COMPOSE) up -d $(DOCKER_SEQ)
 RUN_DOCKER_RPC := $(DOCKER_COMPOSE) up -d $(DOCKER_RPC)
+RUN_DOCKER_RPC_2 := $(DOCKER_COMPOSE) up -d $(DOCKER_RPC_2)
 RUN_DOCKER_MAINNET_SEQ := $(DOCKER_COMPOSE) up -d $(DOCKER_MAINNET_SEQ)
 RUN_DOCKER_MAINNET_RPC := $(DOCKER_COMPOSE) up -d $(DOCKER_MAINNET_RPC)
 RUN_DOCKER_L1_NETWORK := $(DOCKER_COMPOSE) up -d $(DOCKER_L1_NETWORK)
@@ -43,13 +45,11 @@ RUN_DOCKER_APOLLO_CONFIGSERVICE := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_APOLL
 RUN_DOCKER_APOLLO_ADMINSERVICE := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_APOLLO_ADMINSERVICE)
 RUN_DOCKER_APOLLO_PORTAL := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_APOLLO_PORTAL)
 RUN_DOCKER_APOLLO_MYSQL := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_APOLLO_MYSQL)
-RUN_DOCKER_APOLLO_SEQ := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_SEQ)
-RUN_DOCKER_APOLLO_RPC := $(DOCKER_COMPOSE_APOLLO) up -d $(DOCKER_RPC)
 
 
 STOP_DOCKER_SEQ := $(DOCKER_COMPOSE) stop $(DOCKER_SEQ)
 STOP_DOCKER_RPC := $(DOCKER_COMPOSE) stop $(DOCKER_RPC)
-STOP := $(DOCKER_COMPOSE) down --remove-orphans; sleep 3; rm -rf data
+STOP := $(DOCKER_COMPOSE) down --remove-orphans; sleep 3; rm -rf data/*;
 
 INIT_BRIDGE_ACCOUNT := cast send -f 0x8f8E2d6cF621f30e9a11309D6A56A876281Fd534  --private-key 0x815405dddb0e2a99b12af775fd2929e526704e1d1aea6a0b4e74dc33e2f7fcd2 --value 0.01ether 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 --legacy --rpc-url http://127.0.0.1:8123 --async
 INIT_POLYGON_ZKEVM_BRIDGE_ACCOUNT := cast send -f 0x8943545177806ed17b9f23f0a21ee5948ecaa776  --private-key 0xbcdf20249abf0ed6d944c0288fad489e33f66b3960d9e6229c1cd214ed3bbe31 --value 0.01ether 0x3b59731225d8567ad89343a4669509fa91ba37ee --legacy --rpc-url http://127.0.0.1:8127 --async
@@ -77,7 +77,7 @@ run: stop build-docker
 	$(DOCKER_COMPOSE) up -d xlayer-pool-manager
 
 	sleep 5
-	$(DOCKER_COMPOSE) up -d xlayer-rpc
+	RT_ENABLED=0 $(DOCKER_COMPOSE) up -d xlayer-rpc
 
 	sleep 10
 	$(DOCKER_COMPOSE) up -d xlayer-bridge-service
@@ -107,7 +107,8 @@ realtime-run: stop build-docker
 	$(DOCKER_COMPOSE) up -d xlayer-pool-manager
 
 	sleep 5
-	$(DOCKER_COMPOSE) up -d xlayer-rpc
+	RT_ENABLED=1 $(DOCKER_COMPOSE) up -d xlayer-rpc
+	$(DOCKER_COMPOSE) up -d xlayer-rpc-2
 
 	sleep 10
 	$(DOCKER_COMPOSE) up -d xlayer-bridge-service
@@ -180,6 +181,7 @@ test:
 		run_test kurtosis-cdk; \
 		run_test resequence-default; \
 		run_test resequence-ac-split; \
+		run_test test-realtime-e2e; \
 		echo "\n========== Tests completed at $$(date) =========="; \
 		if [ $$ERROR_COUNT -gt 0 ]; then \
 			echo "❌ $$ERROR_COUNT tests failed:"; \
@@ -237,6 +239,16 @@ test-e2e: stop all ## Runs group xlayer feature e2e tests checking race conditio
 	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../ci/e2e-1/...
 	echo "E2E tests passed"
 
+.PHONY: test-realtime-e2e
+test-realtime-e2e: stop realtime-run
+	sleep 3
+	docker ps -a
+	# Run default
+	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../ci/e2e-1/...
+	# Run realtime e2e tests
+	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../zk/realtime/test/...
+	echo "E2E tests passed"
+
 .PHONY: min-apollo
 min-apollo: build-docker
 	$(RUN_DOCKER_APOLLO_MYSQL)
@@ -249,7 +261,7 @@ min-apollo: build-docker
 	# app services
 	$(RUN_DOCKER_L1_NETWORK)
 	sleep 3
-	$(RUN_DOCKER_APOLLO_SEQ)
+	$(DOCKER_COMPOSE_APOLLO) up -d xlayer-seq
 	$(RUN_DOCKER_PROMETHEUS)
 	$(RUN_DOCKER_GRAFANA)
 
@@ -262,23 +274,48 @@ apollo:  build-docker
 	sleep 10
 	$(RUN_DOCKER_APOLLO_PORTAL)
 
-	# base services
-	$(RUN_DOCKER_L1_NETWORK)
-	$(RUN_DOCKER_POOL_DB)
-	sleep 3
-	$(RUN_DOCKER_APPROVE)
+	$(DOCKER_COMPOSE) up -d xlayer-mock-l1-network
+	$(DOCKER_COMPOSE) up -d xlayer-agg-db
+	$(DOCKER_COMPOSE) up -d xlayer-bridge-db
+	$(DOCKER_COMPOSE) up -d xlayer-pool-db
+	$(DOCKER_COMPOSE) up -d xlayer-agglayer-prover
+	$(DOCKER_COMPOSE) up -d xlayer-agglayer
+	$(DOCKER_COMPOSE) up -d xlayer-bridge-redis
+	$(DOCKER_COMPOSE) up -d kafka-zookeeper
+	$(DOCKER_COMPOSE) up -d xlayer-bridge-coin-kafka
+	$(RUN_DOCKER_KAFKA)
 
-	# app services
-	sleep 3
-	$(RUN_DOCKER_APOLLO_SEQ)
+	sleep 15
+	$(DOCKER_COMPOSE) up -d xlayer-approve
+	$(DOCKER_COMPOSE_APOLLO) up -d xlayer-seq
+	$(DOCKER_COMPOSE) up -d xlayer-pool-manager
+
+	sleep 5
+	RT_ENABLED=0 $(DOCKER_COMPOSE_APOLLO) up -d xlayer-rpc
+	$(DOCKER_COMPOSE) up -d xlayer-rpc-2
+
 	sleep 10
-	$(RUN_DOCKER_DS)
-	$(RUN_DOCKER_POOL_MANAGER)
-	$(RUN_DOCKER_APOLLO_RPC)
+	$(DOCKER_COMPOSE) up -d xlayer-bridge-service
+	$(DOCKER_COMPOSE) up -d xlayer-bridge-ui
+	$(INIT_BRIDGE_ACCOUNT)
+	
+	mkdir -p data/aggkit
+	chmod -R 777 data 
+	$(DOCKER_COMPOSE) up -d xlayer-aggkit
 
-	# monitoring services
-	$(RUN_DOCKER_PROMETHEUS)
-	$(RUN_DOCKER_GRAFANA)
+.PHONY: test-data-stream-unwind
+test-data-stream-unwind:
+	make stop
+	make run
+	sleep 30
+	$(STOP_DOCKER_SEQ)
+	echo "test-data-stream-unwind-step-1"
+	go test -count=1 -failfast -race -v -p 1 -timeout 10s -run TestAddFlag ./e2e/data_stream_unwind_test.go
+	$(RUN_DOCKER_SEQ)
+	sleep 10
+	echo "test-data-stream-unwind-step-2"
+	docker logs xlayer-seq 2>&1 | grep -q "Unwinding data stream to block number.*blockNumber=5" && echo "✔ Found unwind message for block 5" || echo "✘ Missing unwind message for block 5"
+	docker logs xlayer-seq 2>&1 | grep -q "\[stream-catchup\] Getting progress.*previousProgress=4" && echo "✔ Found stream-catchup progress message" || echo "✘ Missing stream-catchup progress message"
 	
 
 # Target to add data loss testing logic

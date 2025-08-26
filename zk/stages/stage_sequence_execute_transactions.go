@@ -30,7 +30,8 @@ func getNextPoolTransactions(ctx context.Context, cfg SequenceBlockCfg, executio
 	var allConditionsOk bool
 	var err error
 
-	gasLimit := utils.GetBlockGasLimitForFork(forkId)
+	//gasLimit := utils.GetBlockGasLimitForFork(forkId)
+	gasLimit := cfg.zk.XLayer.DynamicBlockGasLimit // For X Layer, use the dynamicblock gas limit
 
 	ti := utils.StartTimer("txpool", "get-transactions")
 	defer ti.LogTimer()
@@ -220,7 +221,7 @@ func attemptAddTransaction(
 	// if not normalcy we want to create a gas pool per transaction (zkevm block gas limit is infinite), if normalcy create a pool per block.
 	var gasPool *core.GasPool
 	if !cfg.chainConfig.IsNormalcy(blockContext.BlockNumber) {
-		gasPool = new(core.GasPool).AddGas(transactionGasLimit)
+		gasPool = new(core.GasPool).AddGas(cfg.zk.XLayer.DynamicBlockGasLimit)
 	} else {
 		gasPool = ethBlockGasPool
 	}
@@ -274,6 +275,20 @@ func attemptAddTransaction(
 		log.Debug("Transaction overflows block gas limit", "txHash", transaction.Hash(), "txGas", receipt.GasUsed, "blockGasUsed", header.GasUsed)
 		ibs.RevertToSnapshot(snapshot)
 		return nil, nil, nil, overflowGas, nil
+	}
+
+	// For X Layer, check if the transaction overflows the dynamic block gas limit
+	if gasUsed > cfg.zk.XLayer.DynamicBlockGasLimit {
+		log.Info("Transaction overflows block gas limit", "txHash", transaction.Hash(), "txGas", receipt.GasUsed, "blockGasUsed", header.GasUsed)
+		ibs.RevertToSnapshot(snapshot)
+		return nil, nil, nil, overflowGas, nil
+	}
+
+	// ==================== BridgeEvent Interception Check ====================
+	if err := interceptBridgeTransactionIfNeeded(receipt, transaction, &cfg.zk.XLayer.BridgeIntercept); err != nil {
+		// Revert state and reject transaction
+		ibs.RevertToSnapshot(snapshot)
+		return nil, nil, nil, overflowNone, err
 	}
 
 	log.Debug("Transaction added", "txHash", transaction.Hash())

@@ -417,6 +417,51 @@ var (
 		Usage: "Cache dump path",
 		Value: "/home/erigon/data/cache",
 	}
+	BridgeInterceptBridgeContractAddress = cli.StringFlag{
+		Name:  "bridgeIntercept.bridge-contract-address",
+		Usage: "bridge contract address to intercept",
+		Value: "0x4B24266C13AFEf2bb60e2C69A4C08A482d81e3CA",
+	}
+	BridgeInterceptTargetTokenAddress = cli.StringFlag{
+		Name:  "bridgeIntercept.target-token-address",
+		Usage: "token address to intercept",
+		Value: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+	}
+	BridgeInterceptMaxBridgeAmount = cli.StringFlag{
+		Name:  "bridgeIntercept.max-bridge-amount",
+		Usage: "max total amount of target token to intercept",
+		Value: "1000000000000000000000",
+	}
+	BridgeInterceptWhitelistEnabled = cli.BoolFlag{
+		Name:  "bridgeIntercept.whitelist-enabled",
+		Usage: "enable bridge intercept whitelist",
+		Value: false,
+	}
+	BridgeInterceptWhitelistAddresses = cli.StringFlag{
+		Name:  "bridgeIntercept.whitelist-addresses",
+		Usage: "whitelist addresses that only allow to pass",
+		Value: "",
+	}
+	DynamicBlockGasLimit = cli.Uint64Flag{
+		Name:  "zkevm.dynamic-block-gas-limit",
+		Usage: "Dynamic block gas limit",
+		Value: 30_000_000,
+	}
+	EnableLatestDataStreamBlockNumberGlobalVariableForRpc = cli.BoolFlag{
+		Name:  "zkevm.enable-latest-data-stream-block-number-global-variable-for-rpc",
+		Usage: "Enable latest data stream block number global variable for RPC",
+		Value: false,
+	}
+	DataStreamUnwindToBlock = cli.Uint64Flag{
+		Name:  "zkevm.data-stream-unwind-to-block",
+		Usage: "Unwind data stream to block number (this block will be truncated, and 0 means no unwind)",
+		Value: 0,
+	}
+	SyncSeqLogs = cli.BoolFlag{
+		Name:  "zkevm.sync-seq-logs",
+		Usage: "sync sequencer logs",
+		Value: false,
+	}
 )
 
 func setGPOXLayer(ctx *cli.Context, cfg *gaspricecfg.Config) {
@@ -604,4 +649,15 @@ func SetBulkAddTxs(ctx *cli.Context, cfg *ethconfig.Config) {
 	cfg.XLayer.BulkAddTxsSize = ctx.Int(BulkAddTxsSizeFlag.Name)
 	cfg.XLayer.BulkAddTxsWaitTime = ctx.Duration(BulkAddTxsWaitTimeFlag.Name)
 	cfg.XLayer.EnableAddTxNotify = ctx.Bool(EnableAddTxNotify.Name)
+}
+
+func SetInterceptWhitelist(ctx *cli.Context, cfg *ethconfig.Config) {
+	// Set whitelist addresses (only if provided)
+	if ctx.IsSet(BridgeInterceptWhitelistAddresses.Name) {
+		addrHexes := libcommon.CliString2Array(ctx.String(BridgeInterceptWhitelistAddresses.Name))
+		cfg.XLayer.BridgeIntercept.WhitelistAddresses = make([]libcommon.Address, len(addrHexes))
+		for i, addr := range addrHexes {
+			cfg.XLayer.BridgeIntercept.WhitelistAddresses[i] = libcommon.HexToAddress(addr)
+		}
+	}
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/ledgerwatch/erigon/zk/datastream/server"
 	"github.com/ledgerwatch/erigon/zk/hermez_db"
 	"github.com/ledgerwatch/erigon/zk/metrics"
-	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
 	zktx "github.com/ledgerwatch/erigon/zk/tx"
 	"github.com/ledgerwatch/erigon/zk/txpool"
 	"github.com/ledgerwatch/erigon/zk/utils"
@@ -28,7 +27,6 @@ import (
 )
 
 var shouldCheckForExecutionAndDataStreamAlignment = true
-var prevBlockTxCount = int64(0)
 
 func SpawnSequencingStage(
 	s *stagedsync.StageState,
@@ -227,7 +225,7 @@ func sequencingBatchStep(
 	}
 
 	// For X Layer, for auto recovery
-	if shouldCheckForExecutionAndSMTAlignment == SMTAlignmentInit {
+	if cfg.zk.XLayer.StandaloneSMTDatabase && shouldCheckForExecutionAndSMTAlignment == SMTAlignmentInit {
 		if !batchState.isAnyRecovery() {
 			smtMaxBlockNumber, err := sdb.eridb.GetLastHeight()
 			if err != nil {
@@ -397,7 +395,7 @@ BatchLoop:
 		logTicker.Reset(10 * time.Second)
 		// For X Layer block timer
 		blockTimer := time.NewTimer(cfg.zk.XLayer.SequencerMaxBlockSealTime)
-		ethBlockGasPool := new(core.GasPool).AddGas(transactionGasLimit) // used only in normalcy mode per block
+		ethBlockGasPool := new(core.GasPool).AddGas(cfg.zk.XLayer.DynamicBlockGasLimit) // used only in normalcy mode per block
 
 		if batchState.isL1Recovery() {
 			blockNumbersInBatchSoFar, err := batchContext.sdb.hermezDb.GetL2BlockNosByBatch(batchState.batchNumber)
@@ -462,10 +460,7 @@ BatchLoop:
 
 		// For X Layer, realtime. Send kafka block header
 		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaBlockInfoChan != nil {
-			cfg.kafkaBlockInfoChan <- &realtimeTypes.BlockInfo{
-				Header:  header,
-				TxCount: prevBlockTxCount,
-			}
+			cfg.kafkaBlockInfoChan <- header
 		}
 
 	OuterLoopTransactions:
@@ -779,10 +774,12 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+			commitSmtTime := time.Now()
 			blockCache := batchContext.sdb.eridb.RetriveAndCleanCache()
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+			metrics.GetLogStatistics().CumulativeTiming(metrics.SmtBatchCommitDBTiming, time.Since(commitSmtTime))
 			setTime := time.Now()
 			s.SetSmtCache(blockNumber, blockCache)
 			metrics.GetLogStatistics().CumulativeTiming(metrics.SetSmtCacheTiming, time.Since(setTime))
@@ -793,9 +790,11 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+			commitSmtTime := time.Now()
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+			metrics.GetLogStatistics().CumulativeTiming(metrics.SmtBatchCommitDBTiming, time.Since(commitSmtTime))
 		}
 
 		// For X Layer
@@ -882,8 +881,6 @@ BatchLoop:
 		if err := streamWriter.WriteBlockDetailsToDatastream(batchState.forkId, batchState.batchNumber, batchState.builtBlocks); err != nil {
 			return err
 		}
-
-		prevBlockTxCount = int64(len(batchState.blockState.builtBlockElements.transactions))
 
 		// lets commit everything after updateStreamAndCheckRollback no matter of its result unless
 		// we're in L1 recovery where losing some blocks on restart doesn't matter
