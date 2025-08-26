@@ -249,15 +249,11 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 	var preservedData []BlockData
 
 	// Tables that have block_number as key
+	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
+	// Note: dupCursor tables (CanonicalHeader, hermez_blockBatches) excluded - need special handling
 	simpleTables := []string{
 		"Receipt",
-		"CanonicalHeader",
-		"hermez_blockBatches",
 		"block_info_roots",
-		"block_l1_info_tree_index",
-		"plain_state_version",
-		"smt_depths",
-		"MaxTxNum",
 	}
 
 	for i, blockNo := range blockNos {
@@ -294,15 +290,11 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 // clearBatchTables clears all batch-related tables
 func clearBatchTables(tx kv.RwTx) error {
 	// Tables to clear (only batch-related ones, not SMT or other critical tables)
+	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
+	// Note: dupCursor tables (CanonicalHeader, hermez_blockBatches) excluded - need special handling
 	tablesToClear := []string{
 		"Receipt",
-		"CanonicalHeader",
-		"hermez_blockBatches",
 		"block_info_roots",
-		"block_l1_info_tree_index",
-		"plain_state_version",
-		"smt_depths",
-		"MaxTxNum",
 		// Add Header, HeaderNumber, BlockBody if needed
 	}
 
@@ -387,18 +379,12 @@ func deleteBlockData(tx kv.RwTx, blockNo uint64) error {
 	binary.BigEndian.PutUint64(blockKey, blockNo)
 
 	// Delete simple block-related table data (key = block_num_u64)
+	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
+	// Note: dupCursor tables (CanonicalHeader, hermez_blockBatches) excluded - need special handling
 	simpleTables := []string{
 		"Receipt",
-		"CanonicalHeader",
 		// zkEVM specific tables with block_number keys
-		"hermez_blockBatches",      // l2blockno -> batchno
-		"block_info_roots",         // block number -> block info root hash
-		"block_l1_info_tree_index", // block number -> l1 info tree index
-		// State and SMT tables with block_number keys
-		"plain_state_version", // block number -> state version
-		"smt_depths",          // block number -> smt depth
-		// Transaction metadata tables with block_number keys
-		"MaxTxNum", // block number -> max tx num in block
+		"block_info_roots", // block number -> block info root hash
 	}
 	for _, table := range simpleTables {
 		err := tx.Delete(table, blockKey)
@@ -624,10 +610,11 @@ func deleteTransactionLogs(tx kv.RwTx, blockNo uint64) error {
 	return nil
 }
 
-// pruneHistoricalStateData performs aggressive cleanup of historical AccountChangeSet and StorageChangeSet data
+// pruneHistoricalDupCursorData performs aggressive cleanup of historical dupCursor table data
+// (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)
 // while preserving recent batches for operational needs
-func pruneHistoricalStateData(tx kv.RwTx, keepRecentBatches uint64) (int, error) {
-	fmt.Printf("Starting historical state data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
+func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64) (int, error) {
+	fmt.Printf("Starting historical dupCursor data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
 
 	// Get the range of blocks to delete (everything except recent batches)
 	latestBlock, err := getLatestBlockNumber(tx)
@@ -666,7 +653,7 @@ func pruneHistoricalStateData(tx kv.RwTx, keepRecentBatches uint64) (int, error)
 
 	deletedRecords := 0
 
-	// Clean AccountChangeSet data
+	// Clean AccountChangeSet data (dupCursor table)
 	accountDeletedCount, err := pruneAccountChangeSetBeforeBlock(tx, cutoffBlock)
 	if err != nil {
 		return deletedRecords, fmt.Errorf("failed to prune AccountChangeSet: %w", err)
@@ -674,13 +661,29 @@ func pruneHistoricalStateData(tx kv.RwTx, keepRecentBatches uint64) (int, error)
 	deletedRecords += accountDeletedCount
 	fmt.Printf("✓ Deleted %d AccountChangeSet records\n", accountDeletedCount)
 
-	// Clean StorageChangeSet data
+	// Clean StorageChangeSet data (dupCursor table)
 	storageDeletedCount, err := pruneStorageChangeSetBeforeBlock(tx, cutoffBlock)
 	if err != nil {
 		return deletedRecords, fmt.Errorf("failed to prune StorageChangeSet: %w", err)
 	}
 	deletedRecords += storageDeletedCount
 	fmt.Printf("✓ Deleted %d StorageChangeSet records\n", storageDeletedCount)
+
+	// Clean CanonicalHeader data (dupCursor table)
+	canonicalHeaderDeletedCount, err := pruneCanonicalHeaderBeforeBlock(tx, cutoffBlock)
+	if err != nil {
+		return deletedRecords, fmt.Errorf("failed to prune CanonicalHeader: %w", err)
+	}
+	deletedRecords += canonicalHeaderDeletedCount
+	fmt.Printf("✓ Deleted %d CanonicalHeader records\n", canonicalHeaderDeletedCount)
+
+	// Clean hermez_blockBatches data (dupCursor table)
+	hermezBlockBatchesDeletedCount, err := pruneHermezBlockBatchesBeforeBlock(tx, cutoffBlock)
+	if err != nil {
+		return deletedRecords, fmt.Errorf("failed to prune hermez_blockBatches: %w", err)
+	}
+	deletedRecords += hermezBlockBatchesDeletedCount
+	fmt.Printf("✓ Deleted %d hermez_blockBatches records\n", hermezBlockBatchesDeletedCount)
 
 	return deletedRecords, nil
 }
@@ -709,7 +712,7 @@ func pruneAccountChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, erro
 			}
 
 			// Collect all entries for this block (there might be multiple accounts per block)
-			for k, _, err := cursor.SeekExact(key); k != nil && err == nil; k, _, err = cursor.NextDup() {
+			for k, _, err := cursor.SeekExact(key); k != nil; k, _, err = cursor.NextDup() {
 				if err != nil {
 					return 0, err
 				}
@@ -778,12 +781,112 @@ func pruneStorageChangeSetBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, erro
 	return deletedCount, nil
 }
 
+// pruneCanonicalHeaderBeforeBlock deletes CanonicalHeader records before specified block
+func pruneCanonicalHeaderBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+	cursor, err := tx.RwCursorDupSort("CanonicalHeader")
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close()
+
+	// Collect all keys to delete first (safer for DupSort tables)
+	var keysToDelete [][]byte
+
+	// CanonicalHeader key format: block_number(8 bytes) -> block_hash
+	// We need to collect all entries where block_number < cutoffBlock
+	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.NextNoDup() {
+		if err != nil {
+			return 0, err
+		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached the cutoff, stop collecting
+			}
+
+			// Collect all entries for this block (there might be multiple hashes per block in dupCursor)
+			for k, _, err := cursor.SeekExact(key); k != nil; k, _, err = cursor.NextDup() {
+				if err != nil {
+					return 0, err
+				}
+				// Make a copy of the key
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				keysToDelete = append(keysToDelete, keyCopy)
+			}
+		}
+	}
+
+	// Now delete all collected keys using tx.Delete (safer than cursor operations)
+	deletedCount := 0
+	for _, key := range keysToDelete {
+		if err := tx.Delete("CanonicalHeader", key); err != nil {
+			// Log but continue - some keys might not exist anymore
+			continue
+		}
+		deletedCount++
+	}
+
+	return deletedCount, nil
+}
+
+// pruneHermezBlockBatchesBeforeBlock deletes hermez_blockBatches records before specified block
+func pruneHermezBlockBatchesBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, error) {
+	cursor, err := tx.RwCursorDupSort("hermez_blockBatches")
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close()
+
+	// Collect all keys to delete first (safer for DupSort tables)
+	var keysToDelete [][]byte
+
+	// hermez_blockBatches key format: l2blockno(8 bytes) -> batchno
+	// We need to collect all entries where l2blockno < cutoffBlock
+	for key, _, err := cursor.First(); key != nil; key, _, err = cursor.NextNoDup() {
+		if err != nil {
+			return 0, err
+		}
+
+		if len(key) >= 8 {
+			blockNum := binary.BigEndian.Uint64(key[:8])
+			if blockNum >= cutoffBlock {
+				break // Reached the cutoff, stop collecting
+			}
+
+			// Collect all entries for this block (there might be multiple batches per block in dupCursor)
+			for k, _, err := cursor.SeekExact(key); k != nil; k, _, err = cursor.NextDup() {
+				if err != nil {
+					return 0, err
+				}
+				// Make a copy of the key
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				keysToDelete = append(keysToDelete, keyCopy)
+			}
+		}
+	}
+
+	// Now delete all collected keys using tx.Delete (safer than cursor operations)
+	deletedCount := 0
+	for _, key := range keysToDelete {
+		if err := tx.Delete("hermez_blockBatches", key); err != nil {
+			// Log but continue - some keys might not exist anymore
+			continue
+		}
+		deletedCount++
+	}
+
+	return deletedCount, nil
+}
+
 // deleteCompositeKeyData deletes data from tables with composite keys (block_number + hash)
 func deleteCompositeKeyData(tx kv.RwTx, blockNo uint64) error {
 	// Tables with composite key format: block_number_u64 + hash
+	// Note: HeadersTotalDifficulty excluded as it's a small table that doesn't need cleanup
 	compositeKeyTables := []string{
 		"Header",                            // block_num_u64 + hash -> header (RLP)
-		"HeadersTotalDifficulty",            // block_num_u64 + hash -> td (RLP)
 		"BlockBody",                         // block_num_u64 + hash -> block body
 		"TxSender",                          // block_num_u64 + blockHash -> sendersList
 		"hermez_intermediate_tx_stateRoots", // l2blockno + txhash -> stateRoot
@@ -990,7 +1093,7 @@ func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *md
 	// This avoids all geometry mismatch issues
 	db, err := opts.Open(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to open database: %w", err)
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	fmt.Printf("✓ Database opened successfully with default configuration\n")
@@ -1003,17 +1106,17 @@ func getTableCategories() map[string][]string {
 	return map[string][]string{
 		"SMT Related Tables": append(db.HermezSmtTables, "HermezSmtLastRoot"),
 		"Basic Block Tables": {
-			"HeaderNumber", "BadHeaderNumber", "HeadersTotalDifficulty",
+			"HeaderNumber", "BadHeaderNumber",
 			"BlockBody", "Header", "BlockTransaction", "Receipt", "TxSender", "CanonicalHeader",
 			"BlockRoot", "BlockRootToBlockHash", "BlockRootToBlockNumber", "BlockRootToKzgCommitments",
-			"LastBlock", "LastHeader", "MaxTxNum", "TransactionLog", "NonCanonicalTransaction",
+			"LastBlock", "LastHeader", "TransactionLog", "NonCanonicalTransaction",
 			"BlockTransactionLookup", "BlockBorTransactionLookup", "InnerTx",
 		},
 		"State Data Tables": {
 			"PlainState", "HashedStorage", "StateAccounts", "StateStorage",
 			"StateCode", "StateCommitment", "Code", "HashedAccount", "HashedCodeHash",
 			"PlainCodeHash", "TEVMCode", "StateEvents", "StateRoot",
-			"IncarnationMap", "plain_state_version",
+			"IncarnationMap",
 		},
 		"History Data Tables": {
 			"AccountChangeSet", "StorageChangeSet", "AccountHistory", "StorageHistory",
@@ -1039,9 +1142,9 @@ func getTableCategories() map[string][]string {
 			"hermez_blockBatches", "hermez_globalExitRootsSaved", "hermez_globalExitRoots",
 			"hermez_txPricePercentage", "hermez_stateRoots", "l1_info_tree_updates",
 			"hermez_intermediate_tx_stateRoots", "hermez_batch_witnesses", "hermez_batch_counters",
-			"smt_depths", "invalid_batches", "batch_partially_processed", "local_exit_roots",
+			"invalid_batches", "batch_partially_processed", "local_exit_roots",
 			"hermez_globalExitRoots_batches", "batch_blocks", "block_info_roots",
-			"block_l1_block_hashes", "block_l1_info_tree_index", "l1_info_leaves", "l1_info_roots",
+			"block_l1_block_hashes", "l1_info_leaves", "l1_info_roots",
 			"l1_info_tree_updates_by_ger", "latest_used_ger", "fork_history", "pp_rollup_types",
 			"batch_ends", "block_l1_info_tree_progress", "confirmed_l1_info_tree_update",
 			"l1_batch_data", "l1_injected_batches", "reused_l1_info_tree_index", "rollup_types_forks",
@@ -1069,6 +1172,10 @@ func getTableCategories() map[string][]string {
 		"System Tables": {
 			"Config", "DbInfo", "SyncStage", "Migration", "Sequence", "Snapshots",
 			"erigon_versions", "Issuance",
+		},
+		"Small Tables (No Cleanup)": {
+			"block_l1_info_tree_index", "plain_state_version", "smt_depths",
+			"HeadersTotalDifficulty", "MaxTxNum",
 		},
 		"Debug/Diagnostic Tables": {
 			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
@@ -1113,13 +1220,19 @@ func getCriticalTables() map[string]bool {
 	// Critical state table
 	critical["PlainState"] = true
 
-	// Critical account state table (for nonce consistency)
-	critical["AccountChangeSet"] = true
+	// Note: AccountChangeSet is not marked as critical here since it needs
+	// dupCursor handling in Aggressive mode. It's still protected in Moderate mode.
 
 	// Critical block tracking tables (for system operation)
 	critical["LastBlock"] = true
 	critical["LastHeader"] = true
 	critical["MaxTxNum"] = true
+
+	// Small tables that don't need cleanup (user specified)
+	critical["block_l1_info_tree_index"] = true
+	critical["plain_state_version"] = true
+	critical["smt_depths"] = true
+	critical["HeadersTotalDifficulty"] = true
 
 	// Critical block data tables (for node operation)
 	// Note: Header-related tables use consistent batch-based pruning strategy
@@ -1133,10 +1246,12 @@ func getCriticalTables() map[string]bool {
 	critical["CurrentExecutionPayload"] = true
 
 	// Critical ZKEVM tables for sequencer operation
+	// Note: hermez_blockBatches is excluded here as it needs dupCursor handling in Aggressive mode
+	// Note: smt_depths is moved to small tables list above
 	zkevmCritical := []string{
-		"hermez_forkIds", "hermez_forkIdBlock", "hermez_blockBatches",
+		"hermez_forkIds", "hermez_forkIdBlock",
 		"hermez_globalExitRoots", "hermez_stateRoots", "l1_info_tree_updates",
-		"smt_depths", "batch_blocks", "block_info_roots",
+		"batch_blocks", "block_info_roots",
 		"l1_info_leaves", "l1_info_roots", "latest_used_ger",
 	}
 	for _, table := range zkevmCritical {
@@ -1300,7 +1415,7 @@ func main() {
 		log.Error("  --keep-recent-batches N    Keep recent N batches (default: 10)")
 		log.Error("  --yes, -y                  Skip confirmation prompts")
 		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
-		log.Error("AGGRESSIVE mode: Also cleans historical AccountChangeSet & StorageChangeSet")
+		log.Error("AGGRESSIVE mode: Also cleans 4 historical dupCursor tables (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)")
 		os.Exit(1)
 	}
 
@@ -1479,12 +1594,13 @@ func main() {
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	case PruneLevelAggressive:
-		fmt.Printf("Aggressive pruning: Maximum cleanup including historical state data\n")
-		fmt.Printf("Strategy: All moderate mode deletions + historical AccountChangeSet & StorageChangeSet cleanup\n")
-		fmt.Printf("Preserves: Recent %d batches of state history, SMT data, core operational tables\n", keepRecentBatches)
-		fmt.Printf("Deletes: Same as moderate + historical state change data beyond recent batches\n")
+		fmt.Printf("Aggressive pruning: Maximum cleanup including historical dupCursor data\n")
+		fmt.Printf("Strategy: All moderate mode deletions + historical dupCursor table cleanup\n")
+		fmt.Printf("DupCursor tables processed: AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches\n")
+		fmt.Printf("Preserves: Recent %d batches of dupCursor data, SMT data, core operational tables\n", keepRecentBatches)
+		fmt.Printf("Deletes: Same as moderate + historical dupCursor data beyond recent batches\n")
 		fmt.Printf("Note: PlainState (current state) is always preserved as it contains active account/storage data\n")
-		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical state queries not needed\n")
+		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical queries not needed\n")
 		fmt.Printf("🚀 Maximum space savings: Optimized for nodes with complete SMT and limited historical query needs\n")
 		fmt.Printf("Best for: Advanced production setups, maximum storage optimization\n")
 
@@ -1528,27 +1644,31 @@ func main() {
 			fmt.Printf("✓ Batch-based pruning completed successfully!\n")
 		}
 
-		// Additional aggressive mode: clean historical state data
+		// Additional aggressive mode: clean historical dupCursor data
 		if pruneLevel == PruneLevelAggressive {
-			fmt.Printf("\n=== Executing Aggressive State Data Cleanup ===\n")
-			deletedStateRecords, err := pruneHistoricalStateData(tx, keepRecentBatches)
+			fmt.Printf("\n=== Executing Aggressive DupCursor Data Cleanup ===\n")
+			fmt.Printf("Processing 4 dupCursor tables: AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches\n")
+			deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches)
 			if err != nil {
-				log.Error("Failed to perform state data cleanup", "error", err)
+				log.Error("Failed to perform dupCursor data cleanup", "error", err)
 			} else {
-				fmt.Printf("✓ Historical state data cleanup completed: %d records deleted\n", deletedStateRecords)
+				fmt.Printf("✓ Historical dupCursor data cleanup completed: %d records deleted\n", deletedDupCursorRecords)
 			}
 		}
 	}
 
 	// Filter out block tables from full deletion if we did partial pruning
+	// Note: dupCursor tables need special handling in all modes
 	partiallyPrunedTables := map[string]bool{
 		// Header-related tables (must use same strategy for data consistency)
-		"Header": true, "CanonicalHeader": true, "HeaderNumber": true,
+		"Header": true, "HeaderNumber": true,
 		// Other block data tables
 		"BlockBody": true, "Receipt": true, "TxSender": true, "TransactionLog": true,
 		// zkEVM intermediate data tables
 		"hermez_intermediate_tx_stateRoots": true,
-		// Note: All above tables use batch-based pruning (keep recent batches, delete old data)
+		// DupCursor tables - excluded from normal batch processing due to special cursor requirements
+		"CanonicalHeader":     true, // dupCursor table - needs special handling
+		"hermez_blockBatches": true, // dupCursor table - needs special handling
 	}
 
 	// Execute table deletion

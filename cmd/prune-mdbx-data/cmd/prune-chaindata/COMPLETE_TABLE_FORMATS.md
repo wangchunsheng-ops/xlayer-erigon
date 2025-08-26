@@ -24,12 +24,12 @@ This analysis enables:
 | **TransactionLog** | `block_num_u64 + txId` | logs of transaction | Transaction logs/events | ✅ **Supported** |
 | **HeaderNumber** | `header_hash` | `header_num_u64` | Header hash to number mapping | ⚠️ **Special handling** |
 | **BadHeaderNumber** | `header_hash` | `header_num_u64` | Bad header hash to number | ⚠️ **Special handling** |
-| **HeadersTotalDifficulty** | `block_num_u64 + hash` | td (RLP) | Total difficulty | ✅ **Supported** |
+| **HeadersTotalDifficulty** | `block_num_u64 + hash` | td (RLP) | Total difficulty | 🛡️ **Protected** |
 | **BlockTransaction** | `tx_id_u64` | rlp(tx) | All transactions | ❌ **Excluded** |
 | **NonCanonicalTransaction** | `tbl_sequence_u64` | rlp(tx) | Non-canonical txs | ❌ **Excluded** |
 | **BlockTransactionV3** | `tbl_sequence_u64` | rlp(tx) | Canonical txs v3 | ❌ **Excluded** |
 | **BlockTransactionLookup** | `transaction_hash` | lookup metadata | Tx hash lookup | ❌ **Excluded** |
-| **MaxTxNum** | `block_number_u64` | `max_tx_num_in_block_u64` | Max tx number per block | ✅ **Supported** |
+| **MaxTxNum** | `block_number_u64` | `max_tx_num_in_block_u64` | Max tx number per block | 🛡️ **Protected** |
 
 ### 📊 State Management Tables
 
@@ -105,9 +105,9 @@ This analysis enables:
 | **hermez_globalExitRoots** | `l2blockno` | GER | Block exit roots | ❌ **Critical** |
 | **hermez_stateRoots** | `l2blockno` | stateRoot | State roots | ❌ **Critical** |
 | **l1_info_tree_updates** | `index` | L1InfoTreeUpdate | L1 info updates | ❌ **Critical** |
-| **block_l1_info_tree_index** | `block_number` | l1 info tree index | Block to L1 index | ❌ **Critical** |
+| **block_l1_info_tree_index** | `block_number` | l1 info tree index | Block to L1 index | 🛡️ **Protected** |
 | **block_info_roots** | `block_number` | block info root hash | Block info roots | ❌ **Critical** |
-| **smt_depths** | `block_number` | smt depth | SMT depths | ❌ **Critical** |
+| **smt_depths** | `block_number` | smt depth | SMT depths | 🛡️ **Protected** |
 | **batch_blocks** | `batch_number` | block numbers | Batch to blocks | ❌ **Critical** |
 | *...and 13 more ZKEVM tables* | varies | varies | L2 specific data | ❌ **Critical** |
 
@@ -198,12 +198,14 @@ All domain tables use complex key formats and are excluded from partial pruning:
 | **Polygon/BOR** | 10 | 3 tables | Polygon specific |
 | **Consensus** | 4 | 0 tables | Consensus mechanisms |
 | **Miscellaneous** | 36 | 3 tables | Various utilities |
-| **TOTAL** | **192** | **19 tables** | **Complete database** |
+| **TOTAL** | **192** | **18 tables** | **Complete database** |
 
 ## 🎯 Partial Pruning Implementation Guidelines
 
-### ✅ Safe for Partial Pruning (19 tables)
+### ✅ Safe for Partial Pruning (15 tables)
 These tables have block numbers in their keys and can be safely pruned by block height:
+
+**Note**: 5 small tables (block_l1_info_tree_index, plain_state_version, smt_depths, HeadersTotalDifficulty, MaxTxNum) are now **Protected** instead of pruned due to minimal data size (<10MB each).
 
 1. **Header** - Block headers (block_num + hash key)
 2. **BlockBody** - Block bodies (block_num + hash key)  
@@ -213,18 +215,24 @@ These tables have block numbers in their keys and can be safely pruned by block 
 6. **TransactionLog** - Transaction logs (block_num + txId key)
 7. **HeaderNumber** - Header mappings (⚠️ special value-based handling)
 8. **BadHeaderNumber** - Bad header mappings (⚠️ special value-based handling)
-9. **HeadersTotalDifficulty** - Total difficulty (block_num + hash key)
-10. **MaxTxNum** - Max transaction numbers (block_num key)
-11. **AccountChangeSet** - Account changes (block_num key)
-12. **StorageChangeSet** - Storage changes (block_num key)
-13. **VerkleRoots** - Verkle roots (block_num key)
-14. **CallTraceSet** - Call traces (block_num key)
-15. **BorEventNums** - BOR events (block_num key)
-16. **BorMilestoneEnds** - BOR milestones (block_num key)
-17. **BorCheckpointEnds** - BOR checkpoints (block_num key)
-18. **DevEpoch** - Development epochs (block_num + hash key)
-19. **DevPendingEpoch** - Pending epochs (block_num + hash key)
-20. **Issuance** - Token issuance (block_num key)
+9. **AccountChangeSet** - Account changes (block_num key)
+10. **StorageChangeSet** - Storage changes (block_num key)
+11. **VerkleRoots** - Verkle roots (block_num key)
+12. **CallTraceSet** - Call traces (block_num key)
+13. **BorEventNums** - BOR events (block_num key)
+14. **BorMilestoneEnds** - BOR milestones (block_num key)
+15. **BorCheckpointEnds** - BOR checkpoints (block_num key)
+16. **DevEpoch** - Development epochs (block_num + hash key)
+17. **DevPendingEpoch** - Pending epochs (block_num + hash key)
+18. **Issuance** - Token issuance (block_num key)
+
+### 🛡️ Small Tables Now Protected (5 tables)
+These tables were previously considered for pruning but are now protected due to minimal data size:
+- **HeadersTotalDifficulty** - Total difficulty (block_num + hash key)
+- **MaxTxNum** - Max transaction numbers (block_num key)  
+- **block_l1_info_tree_index** - Block to L1 index (block_num key)
+- **plain_state_version** - State version tracking (block_num key)
+- **smt_depths** - SMT depths (block_num key)
 
 ### ❌ Critical Tables (NEVER DELETE - 65 tables)
 These tables are essential for node operation:

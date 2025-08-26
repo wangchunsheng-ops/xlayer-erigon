@@ -35,7 +35,7 @@ Based on real mainnet data analysis:
 | **BlockBody** | 1.7 GB | Block body data (uncle hashes, etc) | 🔄 | 🔄 |
 | **TxSender** | 1.7 GB | Transaction sender addresses | 🔄 | 🔄 |
 | **block_info_roots** | 1.5 GB | zkEVM block info roots | 🔄 | 🔄 |
-| **CanonicalHeader** | 1.5 GB | Canonical chain headers | 🔄 | 🔄 |
+| **CanonicalHeader** | 1.5 GB | Canonical chain headers | 🛡 | 🔄 |
 
 ### 🟡 Medium Tables (100MB-1GB) - Secondary Targets
 
@@ -43,7 +43,7 @@ Based on real mainnet data analysis:
 |------------|------|-------------|----------|------------|
 | **BlockTransactionLookup** | 896.0 MB | Transaction hash to block mapping | ✅ | ✅ |
 | **hermez_txPricePercentage** | 854.5 MB | Transaction price percentages | ✅ | ✅ |
-| **hermez_blockBatches** | 779.6 MB | Block to batch mappings | 🔄 | 🔄 |
+| **hermez_blockBatches** | 779.6 MB | Block to batch mappings | 🛡️ | 🔄 |
 | **Receipt** | 711.0 MB | Transaction receipts | 🔄 | 🔄 |
 | **LogTopicIndex** | 600.6 MB | Event log topic index | ✅ | ✅ |
 | **batch_blocks** | 303.6 MB | Batch to block relationships | 🛡️ | 🛡️ |
@@ -81,17 +81,17 @@ Based on real mainnet data analysis:
 
 | Table Name | Size | Description | Moderate | Aggressive |
 |------------|------|-------------|----------|------------|
-| **block_l1_info_tree_index** | 1.2 MB | L1 info tree index | 🔄 | 🔄 |
+| **block_l1_info_tree_index** | 1.2 MB | L1 info tree index | 🛡️ | 🛡️ |
 | **Config** | 8.0 KB | Node configuration | 🛡️ | 🛡️ |
 | **DbInfo** | 8.0 KB | Database metadata | 🛡️ | 🛡️ |
 | **SyncStage** | 8.0 KB | Synchronization stages | 🛡️ | 🛡️ |
-| **plain_state_version** | 8.0 KB | State version tracking | 🔄 | 🔄 |
-| **smt_depths** | 8.0 KB | SMT tree depth info | 🔄 | 🔄 |
-| **HeadersTotalDifficulty** | 8.0 KB | Chain total difficulty | 🔄 | 🔄 |
+| **plain_state_version** | 8.0 KB | State version tracking | 🛡️ | 🛡️ |
+| **smt_depths** | 8.0 KB | SMT tree depth info | 🛡️ | 🛡️ |
+| **HeadersTotalDifficulty** | 8.0 KB | Chain total difficulty | 🛡️ | 🛡️ |
 | **IncarnationMap** | 8.0 KB | Account incarnation mapping | 🛡️ | 🛡️ |
 | **LastBlock** | 8.0 KB | Last processed block info | 🛡️ | 🛡️ |
 | **LastHeader** | 8.0 KB | Last header info | 🛡️ | 🛡️ |
-| **MaxTxNum** | 8.0 KB | Maximum transaction number | 🔄 | 🔄 |
+| **MaxTxNum** | 8.0 KB | Maximum transaction number | 🛡️ | 🛡️ |
 | **Sequence** | 8.0 KB | Database sequence numbers | 🛡️ | 🛡️ |
 | **Migration** | 8.0 KB | Database migration info | 🛡️ | 🛡️ |
 | **Issuance** | 8.0 KB | Token issuance tracking | 🛡️ | 🛡️ |
@@ -131,6 +131,10 @@ Based on real mainnet data analysis:
 2. **zkEVM Core**: All `hermez_*` configuration and bridge tables
 3. **SMT Data**: All `HermezSmt*` tables
 4. **Node Operation**: `Config`, `DbInfo`, `SyncStage`, `LastBlock`
+5. **Small Tables**: 5 tables with minimal data (user-specified protection)
+   - `block_l1_info_tree_index`, `plain_state_version`, `smt_depths`
+   - `HeadersTotalDifficulty`, `MaxTxNum`
+   - **Rationale**: Data size < 10MB each, cleanup benefit negligible, safer to preserve
 
 ### Header Table Consistency Strategy
 **Important Fix**: `Header`, `HeaderNumber`, and `CanonicalHeader` now use **consistent batch-based pruning**
@@ -154,7 +158,8 @@ This inconsistency caused data integrity issues where header lookups could fail.
 ### Moderate Mode (Default Recommended)  
 - **Tables Deleted**: 
   - ✅ **Direct Deletion** (9 tables, ~8.5 GB): BlockTransaction, BlockTransactionLookup, hermez_txPricePercentage, LogTopicIndex, AccountHistory, CallFromIndex, CallToIndex, CallTraceSet, LogAddressIndex
-  - 🔄 **Batch-Based Pruning** (15 tables, ~47+ GB): Header, HeaderNumber, CanonicalHeader, Receipt, hermez_blockBatches, BlockBody, TxSender, block_info_roots, TransactionLog, hermez_intermediate_tx_stateRoots, block_l1_info_tree_index, plain_state_version, smt_depths, HeadersTotalDifficulty, MaxTxNum
+  - 🔄 **Batch-Based Pruning** (10 tables, ~47+ GB): Header, HeaderNumber, CanonicalHeader, Receipt, hermez_blockBatches, BlockBody, TxSender, block_info_roots, TransactionLog, hermez_intermediate_tx_stateRoots
+  - 🛡️ **Small Tables Protected** (5 tables, <10MB): block_l1_info_tree_index, plain_state_version, smt_depths, HeadersTotalDifficulty, MaxTxNum
 - **Space Saved**: ~52-57 GB
 - **Strategy**: Production sequencer nodes, recent data preserved
 

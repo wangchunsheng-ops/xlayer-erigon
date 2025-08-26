@@ -21,9 +21,11 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 
 ### 🧹 Data Pruning (`prune-chaindata`) 
 - **Moderate mode (default)**: Comprehensive cleanup with batch retention (~52-57GB savings)  
-- **Aggressive mode**: Maximum cleanup including historical data (~62-67GB savings)
+- **Aggressive mode**: Maximum cleanup including historical dupCursor data (~62-67GB savings)
 - **Batch-based optimization**: Keeps recent zkEVM batches for operational needs
 - **zkEVM table protection**: Automatically protects critical SMT and sequencer tables
+- **Small table protection**: 5 small tables never cleaned (block_l1_info_tree_index, plain_state_version, smt_depths, HeadersTotalDifficulty, MaxTxNum)
+- **DupCursor handling**: Specialized processing for 4 dupCursor tables in Aggressive mode
 - **Copy-Truncate-Restore optimization**: Dramatically faster pruning by preserving recent data instead of deleting old data
 - **Safe alternative**: Use `compact-db` for zero-risk cleanup (~30-35% savings)
 
@@ -128,7 +130,13 @@ Analyzes database structure and provides detailed statistics.
 **Pruning Levels:**
 - `conservative`: Only removes obviously unnecessary tables (~45 tables)
 - `moderate`: Removes verified unnecessary + batch-based pruning (~80+ tables)
-- `aggressive`: Maximum cleanup including historical data (~90+ tables)
+- `aggressive`: Maximum cleanup including historical dupCursor data (~90+ tables)
+
+**Protected Tables:**
+- **Small tables**: 5 small tables are never cleaned regardless of mode (data size < 10MB each)
+  - `block_l1_info_tree_index`, `plain_state_version`, `smt_depths`, `HeadersTotalDifficulty`, `MaxTxNum`
+- **Critical tables**: SMT, zkEVM operational, system configuration tables
+- **DupCursor tables**: Special handling in aggressive mode (AccountChangeSet, StorageChangeSet, CanonicalHeader, hermez_blockBatches)
 
 **Options:**
 - `--keep-recent-batches=N`: Keep N most recent batches (default: 10)
@@ -310,6 +318,12 @@ go build -o prune-tool main.go
 ./prune-tool list-tables /path/to/test/datadir
 ./prune-tool prune-chaindata /path/to/test/datadir conservative --dry-run
 ```
+
+## Documentation
+
+- [ACTIVE_TABLES_ANALYSIS.md](ACTIVE_TABLES_ANALYSIS.md): Detailed analysis of all active tables
+- [SMALL_TABLES_PROTECTION.md](SMALL_TABLES_PROTECTION.md): Strategy for protecting small tables
+- [cmd/prune-chaindata/COMPLETE_TABLE_FORMATS.md](cmd/prune-chaindata/COMPLETE_TABLE_FORMATS.md): Complete table format reference
 
 ## Support
 
