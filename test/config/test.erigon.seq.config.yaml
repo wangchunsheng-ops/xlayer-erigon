@@ -22,7 +22,7 @@ zkevm.l1-query-delay: 6000
 zkevm.rpc-ratelimit: 0
 zkevm.datastream-version: 2
 
-log.console.verbosity: debug
+log.console.verbosity: info
 
 zkevm.sequencer-block-seal-time: "1s"
 zkevm.sequencer-max-block-seal-time: "3s"
