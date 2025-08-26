@@ -2467,24 +2467,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Calculate space savings
+	// Calculate space savings with overflow protection
 	var batchDeletedSize uint64
 	if (pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive) && deletedBatches > 0 {
-		// Estimate batch deletion size (approximate)
+		// Conservative estimation to avoid overflow
 		for _, table := range []string{"BlockBody", "Receipt", "TxSender", "TransactionLog"} {
 			if partiallyPrunedTables[table] {
 				entries, sizeBytes, _, err := getTableStats(chaindb, table)
 				if err == nil && entries > 0 {
-					// Estimate: (deleted_batches / total_batches) * current_size
-					estimatedOriginalSize := sizeBytes * uint64(deletedBatches+5) / 5 // Rough estimate
-					batchDeletedSize += estimatedOriginalSize - sizeBytes
+					// Use a conservative estimate to avoid uint64 overflow
+					// Assume we deleted at most 90% of the data
+					estimatedDeletedSize := sizeBytes * 9 / 10
+					batchDeletedSize += estimatedDeletedSize
 				}
 			}
 		}
 	}
 
-	totalSavedSpace := actualDeletedSize + batchDeletedSize
-	spaceRatio := float64(totalSavedSpace) / float64(totalDbSize) * 100
+	// Protect against overflow in total calculation
+	totalSavedSpace := actualDeletedSize
+	if batchDeletedSize > 0 && totalSavedSpace <= ^uint64(0)-batchDeletedSize {
+		totalSavedSpace += batchDeletedSize
+	}
+
+	// Protect against division by zero and ensure reasonable percentage
+	var spaceRatio float64
+	if totalDbSize > 0 && totalSavedSpace <= totalDbSize {
+		spaceRatio = float64(totalSavedSpace) / float64(totalDbSize) * 100
+	} else {
+		// If calculation seems unreasonable, show conservative estimate
+		spaceRatio = float64(actualDeletedSize) / float64(totalDbSize) * 100
+		totalSavedSpace = actualDeletedSize
+	}
 
 	fmt.Printf("\n=== Pruning Completed ===\n")
 	fmt.Printf("Tables with actual data deleted: %d (out of %d total cleared)\n", actuallyDeletedTables, deletedCount)
@@ -2493,8 +2507,16 @@ func main() {
 	}
 	fmt.Printf("Total space freed: %s (%.2f%% of database)\n",
 		datasize.ByteSize(totalSavedSpace).HumanReadable(), spaceRatio)
-	fmt.Printf("Database size after pruning: %s\n",
-		datasize.ByteSize(totalDbSize-totalSavedSpace).HumanReadable())
+
+	// Calculate remaining database size with overflow protection
+	var remainingSize uint64
+	if totalSavedSpace <= totalDbSize {
+		remainingSize = totalDbSize - totalSavedSpace
+	} else {
+		// If saved space exceeds total size (calculation error), show original size
+		remainingSize = totalDbSize
+	}
+	fmt.Printf("Database size after pruning: %s\n", datasize.ByteSize(remainingSize).HumanReadable())
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
 
 }
