@@ -21,14 +21,14 @@ else
   docker compose stop xlayer-seq
 fi
 
-docker-compose stop xlayer-rpc
+docker compose stop xlayer-rpc
 
-docker-compose stop xlayer-bridge-service
-docker-compose stop xlayer-bridge-ui
-docker-compose stop xlayer-agg-sender
+docker compose stop xlayer-bridge-service
+docker compose stop xlayer-bridge-ui
+docker compose stop xlayer-agg-sender
 
-docker-compose stop xlayer-agglayer
-docker-compose stop xlayer-agglayer-prover
+docker compose stop xlayer-agglayer
+docker compose stop xlayer-agglayer-prover
 
 LOG_OUTPUT=$(docker compose logs --since=0 --tail=all xlayer-seq 2>&1)
 echo "LOG_OUTPUT: $LOG_OUTPUT"
@@ -358,10 +358,10 @@ docker run --rm \
         apt-get install docker.io -y
         docker --version
         docker ps --format 'table {{.Names}}\t{{.Status}}' | head -3
-        
+
         echo '🚀 Running make reproducible-prestate...'
         make reproducible-prestate
-        
+
         echo '📁 Checking contents of op-program/bin:'
         ls -la /app/op-program/bin/ || echo 'Directory is empty or does not exist'
     "
