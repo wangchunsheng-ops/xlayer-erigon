@@ -244,7 +244,7 @@ test-realtime-e2e: stop realtime-run
 	sleep 3
 	docker ps -a
 	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 1200s ../ci/e2e-1/... ../zk/realtime/test/...
-	echo "E2E tests passed"
+	echo "Realtime E2E tests passed"
 
 .PHONY: min-apollo
 min-apollo: build-docker
