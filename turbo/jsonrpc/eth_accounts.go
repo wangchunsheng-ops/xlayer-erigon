@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutil"
+	"github.com/ledgerwatch/erigon-lib/kv"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
 	"google.golang.org/grpc"
 
+	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/log/v3"
 
@@ -48,7 +50,7 @@ func (api *APIImpl) GetBalance(ctx context.Context, address libcommon.Address, b
 }
 
 // GetTransactionCount implements eth_getTransactionCount. Returns the number of transactions sent from an address (the nonce).
-func (api *APIImpl) GetTransactionCount(ctx context.Context, address libcommon.Address, blockNrOrHash *rpc.BlockNumberOrHash) (*hexutil.Uint64, error) {
+func (api *APIImpl) GetTransactionCount(ctx context.Context, address libcommon.Address, blockNrOrHash *rpc.BlockNumberOrHash) (result *hexutil.Uint64, finalErr error) {
 	// zkevm: forward requests to the sequencer
 	if !sequencer.IsSequencer() {
 		res, err := api.sendGetTransactionCountToSequencer(api.l2RpcUrl, address, blockNrOrHash)
@@ -78,15 +80,63 @@ func (api *APIImpl) GetTransactionCount(ctx context.Context, address libcommon.A
 			return (*hexutil.Uint64)(&reply.Nonce), nil
 		}
 	}
+
 	tx, err1 := api.db.BeginRo(ctx)
 	if err1 != nil {
 		return nil, fmt.Errorf("getTransactionCount cannot open tx: %w", err1)
 	}
 	defer tx.Rollback()
 
+	// defer to catch any error or panic, fallback to plainstate query
+	defer func() {
+		if r := recover(); r != nil || finalErr != nil {
+			log.Warn("GetTransactionCount error, falling back to PlainState",
+				"address", address.Hex(),
+				"blockNrOrHash", blockNrOrHash,
+				"panic", r,
+				"error", finalErr)
+
+			// fallback to direct PlainState query
+			enc, err := tx.GetOne(kv.PlainState, address.Bytes())
+			if err != nil {
+				// if plainstate also fails, keep original error
+				if finalErr == nil && r != nil {
+					finalErr = fmt.Errorf("panic: %v", r)
+				}
+				return
+			}
+
+			if len(enc) == 0 {
+				// account does not exist, nonce is 0
+				nonce := hexutil.Uint64(0)
+				result = &nonce
+				finalErr = nil
+				log.Info("GetTransactionCount fallback: account not found, returning nonce 0", "address", address.Hex())
+				return
+			}
+
+			var a accounts.Account
+			if err = a.DecodeForStorage(enc); err != nil {
+				// if decode fails, keep original error
+				if finalErr == nil && r != nil {
+					finalErr = fmt.Errorf("panic: %v", r)
+				}
+				return
+			}
+
+			// successfully got nonce from plainstate
+			result = (*hexutil.Uint64)(&a.Nonce)
+			finalErr = nil
+			log.Info("GetTransactionCount fallback successful",
+				"address", address.Hex(),
+				"nonce", a.Nonce)
+		}
+	}()
+
 	latestExecutedBlockNumber, err := rpchelper.GetLatestExecutedBlockNumber(tx)
 	if err != nil {
-		return nil, fmt.Errorf("getTransactionCount cannot get latest executed block number: %w", err)
+		finalErr = fmt.Errorf("getTransactionCount cannot get latest executed block number: %w", err)
+		return nil, finalErr
 	}
 
 	if blockNrOrHash.BlockNumber != nil && *blockNrOrHash.BlockNumber == rpc.BlockNumber(latestExecutedBlockNumber) {
@@ -96,11 +146,13 @@ func (api *APIImpl) GetTransactionCount(ctx context.Context, address libcommon.A
 
 	reader, err := rpchelper.CreateStateReader(ctx, tx, *blockNrOrHash, 0, api.filters, api.stateCache, api.historyV3(tx), "")
 	if err != nil {
+		finalErr = err
 		return nil, err
 	}
 	nonce := hexutil.Uint64(0)
 	acc, err := reader.ReadAccountData(address)
 	if acc == nil || err != nil {
+		finalErr = err
 		return &nonce, err
 	}
 	return (*hexutil.Uint64)(&acc.Nonce), err
