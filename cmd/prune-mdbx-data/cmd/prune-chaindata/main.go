@@ -172,6 +172,7 @@ func main() {
 		log.Error("  --fast-dupfree            Enable fast dupCursor deletion (higher performance, more aggressive)")
 		log.Error("  --safe-fast               Enable safe-fast mode (balanced performance and safety)")
 		log.Error("  --yes, -y                  Skip confirmation prompts")
+		log.Error("  --force                    Skip safety checks for copied databases")
 		log.Error("NOTE: Uses batch-based pruning for X Layer zkEVM")
 		log.Error("AGGRESSIVE mode: Also cleans 2 historical dupCursor tables (+12.5GB: AccountChangeSet, StorageChangeSet) - preserves CanonicalHeader and hermez_blockBatches for stability")
 		os.Exit(1)

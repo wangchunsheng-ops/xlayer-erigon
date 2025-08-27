@@ -87,7 +87,9 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 	simpleTables := []string{
 		"Receipt",
 		"block_info_roots",
-		"CanonicalHeader", // Critical: block_num -> canonical_header_hash mapping
+		// Note: CanonicalHeader and hermez_blockBatches are EXCLUDED in Moderate mode
+		// These tables have dependencies with AccountChangeSet/StorageChangeSet
+		// and must remain intact to avoid MDBX_EKEYMISMATCH errors
 	}
 
 	// Tables with composite keys starting with block_number (key = block_num_u64 + additional_data)
@@ -135,6 +137,10 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 			blockData.Data["HeaderNumber"] = serializeEntries(headerNumberData)
 		}
 
+		// Note: Historical state tables (AccountChangeSet, StorageChangeSet, AccountHistory, StorageHistory)
+		// are NOT processed in Moderate mode - they remain completely untouched
+		// These tables are only processed in Aggressive mode with special dupCursor handling
+
 		preservedData = append(preservedData, blockData)
 	}
 
@@ -146,21 +152,23 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 func clearBatchTables(tx kv.RwTx) error {
 	// Tables to clear - all block-related tables that should be partially pruned
 	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
-	// Note: hermez_blockBatches excluded (dupCursor table) - needs special handling due to batch metadata complexity
 	tablesToClear := []string{
 		// Simple block tables (key = block_num_u64)
 		"Receipt",
 		"block_info_roots",
 		// Composite key tables (key = block_num_u64 + additional_data)
-		"Header",
-		"BlockBody",
+		//"Header",
+		//"BlockBody",
 		"TxSender",
 		"TransactionLog",
 		"hermez_intermediate_tx_stateRoots",
 		// Special mapping table (key = header_hash -> block_num_u64)
-		"HeaderNumber",
-		// Critical: CanonicalHeader must be cleared and restored to maintain consistency with Header table
-		"CanonicalHeader",
+		//"HeaderNumber",
+
+		// Note: CanonicalHeader, hermez_blockBatches, batch_blocks are EXCLUDED
+		// These tables have data dependencies with AccountChangeSet/StorageChangeSet
+		// In Moderate mode: must remain intact to avoid MDBX_EKEYMISMATCH errors
+		// Trade-off: this may cause some referential inconsistency but avoids database corruption
 	}
 
 	fmt.Printf("🚀 Applying optimized deletion strategy to batch tables...\n")
@@ -202,7 +210,9 @@ func restoreBlockData(tx kv.RwTx, preservedData []BlockData) error {
 	simpleTables := map[string]bool{
 		"Receipt":          true,
 		"block_info_roots": true,
-		"CanonicalHeader":  true, // Critical: block_num -> canonical_header_hash mapping
+		// Note: CanonicalHeader and hermez_blockBatches are EXCLUDED in Moderate mode
+		// These tables have dependencies with AccountChangeSet/StorageChangeSet
+		// and must remain intact to avoid MDBX_EKEYMISMATCH errors
 	}
 
 	for i, blockData := range preservedData {
@@ -348,6 +358,70 @@ func deserializeEntries(data []byte) ([]KeyValueEntry, error) {
 
 	if err := decoder.Decode(&entries); err != nil {
 		return nil, err
+	}
+
+	return entries, nil
+}
+
+// Note: getLatestBlockNumber function is defined in partial_cleanup.go
+
+// copyAccountChangeSetData and copyStorageChangeSetData are preserved here but NOT used in Moderate mode
+// In Moderate mode: AccountChangeSet and StorageChangeSet are completely untouched (never cleared)
+// In Aggressive mode: These functions would be used with special dupCursor handling
+//
+// Historical state tables remain intact in Moderate mode to maintain RPC functionality
+
+// copyAccountChangeSetData copies AccountChangeSet entries for a specific block (Aggressive mode only)
+func copyAccountChangeSetData(tx kv.RwTx, blockNo uint64) ([]KeyValueEntry, error) {
+	cursor, err := tx.CursorDupSort("AccountChangeSet")
+	if err != nil {
+		return nil, err // Table might not exist
+	}
+	defer cursor.Close()
+
+	blockKey := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockKey, blockNo)
+
+	var entries []KeyValueEntry
+
+	// Find all entries for this block using DupCursor
+	for key, value, err := cursor.Seek(blockKey); key != nil && bytes.Equal(key, blockKey); key, value, err = cursor.NextDup() {
+		if err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, KeyValueEntry{
+			Key:   common.Copy(key),
+			Value: common.Copy(value),
+		})
+	}
+
+	return entries, nil
+}
+
+// copyStorageChangeSetData copies StorageChangeSet entries for a specific block (Aggressive mode only)
+func copyStorageChangeSetData(tx kv.RwTx, blockNo uint64) ([]KeyValueEntry, error) {
+	cursor, err := tx.CursorDupSort("StorageChangeSet")
+	if err != nil {
+		return nil, err // Table might not exist
+	}
+	defer cursor.Close()
+
+	blockKey := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockKey, blockNo)
+
+	var entries []KeyValueEntry
+
+	// Find all entries for this block using DupCursor
+	for key, value, err := cursor.Seek(blockKey); key != nil && bytes.Equal(key, blockKey); key, value, err = cursor.NextDup() {
+		if err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, KeyValueEntry{
+			Key:   common.Copy(key),
+			Value: common.Copy(value),
+		})
 	}
 
 	return entries, nil
