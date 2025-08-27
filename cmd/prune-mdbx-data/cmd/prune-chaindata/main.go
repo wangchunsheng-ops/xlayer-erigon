@@ -322,9 +322,9 @@ func main() {
 	fmt.Printf("Critical tables (will be preserved): %d\n", len(critical))
 
 	if len(toDelete) == 0 {
-		fmt.Printf("No tables found for deletion (target tables are empty or don't exist with data)\n")
+		fmt.Printf("No tables found for complete deletion (target tables are empty or don't exist with data)\n")
 		fmt.Printf("Target tables for complete deletion: BlockTransaction, BlockTransactionLookup, hermez_txPricePercentage, LogTopicIndex, AccountHistory, CallFromIndex, CallToIndex, CallTraceSet, LogAddressIndex\n")
-		return
+		fmt.Printf("Note: Will still perform batch-based partial pruning if configured\n")
 	}
 
 	// Calculate space to be freed and database size
@@ -394,10 +394,18 @@ func main() {
 	}
 
 	// Ask for user confirmation
-	fmt.Printf("\n⚠️  WARNING: This operation will permanently delete the above table data!\n")
+	if len(toDelete) > 0 {
+		fmt.Printf("\n⚠️  WARNING: This operation will permanently delete the above table data!\n")
+	} else {
+		fmt.Printf("\n⚠️  WARNING: This operation will perform batch-based partial pruning!\n")
+	}
 
 	if !autoYes {
-		fmt.Printf("Please enter 'yes' to confirm deletion: ")
+		if len(toDelete) > 0 {
+			fmt.Printf("Please enter 'yes' to confirm deletion: ")
+		} else {
+			fmt.Printf("Please enter 'yes' to confirm partial pruning: ")
+		}
 
 		var confirm string
 		fmt.Scanln(&confirm)

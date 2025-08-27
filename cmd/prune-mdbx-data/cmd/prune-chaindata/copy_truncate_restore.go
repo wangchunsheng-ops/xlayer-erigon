@@ -1,12 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 
+	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/zk/hermez_db"
 )
+
+// KeyValueEntry represents a key-value pair for serialization
+type KeyValueEntry struct {
+	Key   []byte
+	Value []byte
+}
 
 // executeCopyTruncateRestore implements the optimized pruning strategy
 func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFromBatch, latestBatch, pruneBefore uint64) (int, int, error) {
@@ -74,12 +83,20 @@ func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, 
 func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 	var preservedData []BlockData
 
-	// Tables that have block_number as key
-	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
-	// Note: dupCursor tables (CanonicalHeader, hermez_blockBatches) excluded - need special handling
+	// Tables with simple block_number key (key = block_num_u64)
 	simpleTables := []string{
 		"Receipt",
 		"block_info_roots",
+		"CanonicalHeader", // Critical: block_num -> canonical_header_hash mapping
+	}
+
+	// Tables with composite keys starting with block_number (key = block_num_u64 + additional_data)
+	compositeKeyTables := []string{
+		"Header",                            // block_num_u64 + hash
+		"BlockBody",                         // block_num_u64 + hash
+		"TxSender",                          // block_num_u64 + blockHash
+		"TransactionLog",                    // block_num_u64 + txIndex + logIndex
+		"hermez_intermediate_tx_stateRoots", // l2blockno + txhash
 	}
 
 	for i, blockNo := range blockNos {
@@ -95,7 +112,7 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 		blockKey := make([]byte, 8)
 		binary.BigEndian.PutUint64(blockKey, blockNo)
 
-		// Copy data from simple tables
+		// Copy data from simple tables (direct key lookup)
 		for _, table := range simpleTables {
 			data, err := tx.GetOne(table, blockKey)
 			if err == nil && data != nil {
@@ -103,8 +120,20 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 			}
 		}
 
-		// TODO: Add special handling for Header, HeaderNumber, BlockBody if needed
-		// For now, keep it simple and focus on the main bottleneck
+		// Copy data from composite key tables (need to find all keys starting with block_num)
+		for _, table := range compositeKeyTables {
+			entries, err := copyCompositeKeyData(tx, table, blockKey)
+			if err == nil && len(entries) > 0 {
+				// Store multiple entries for this table as a single serialized blob
+				blockData.Data[table] = serializeEntries(entries)
+			}
+		}
+
+		// Special handling for HeaderNumber table (header_hash -> block_num mapping)
+		headerNumberData, err := copyHeaderNumberData(tx, blockNo)
+		if err == nil && len(headerNumberData) > 0 {
+			blockData.Data["HeaderNumber"] = serializeEntries(headerNumberData)
+		}
 
 		preservedData = append(preservedData, blockData)
 	}
@@ -115,13 +144,23 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 
 // clearBatchTables clears all batch-related tables using optimized deletion strategy
 func clearBatchTables(tx kv.RwTx) error {
-	// Tables to clear (only batch-related ones, not SMT or other critical tables)
+	// Tables to clear - all block-related tables that should be partially pruned
 	// Note: small tables (block_l1_info_tree_index, plain_state_version, smt_depths, MaxTxNum) excluded from cleanup
-	// Note: dupCursor tables (CanonicalHeader, hermez_blockBatches) excluded - need special handling
+	// Note: hermez_blockBatches excluded (dupCursor table) - needs special handling due to batch metadata complexity
 	tablesToClear := []string{
+		// Simple block tables (key = block_num_u64)
 		"Receipt",
 		"block_info_roots",
-		// Add Header, HeaderNumber, BlockBody if needed
+		// Composite key tables (key = block_num_u64 + additional_data)
+		"Header",
+		"BlockBody",
+		"TxSender",
+		"TransactionLog",
+		"hermez_intermediate_tx_stateRoots",
+		// Special mapping table (key = header_hash -> block_num_u64)
+		"HeaderNumber",
+		// Critical: CanonicalHeader must be cleared and restored to maintain consistency with Header table
+		"CanonicalHeader",
 	}
 
 	fmt.Printf("🚀 Applying optimized deletion strategy to batch tables...\n")
@@ -159,6 +198,13 @@ func clearTablesWithOptimization(tx kv.RwTx, tables []string, operationName stri
 
 // restoreBlockData restores preserved block data to tables
 func restoreBlockData(tx kv.RwTx, preservedData []BlockData) error {
+	// Tables with simple block_number key (key = block_num_u64)
+	simpleTables := map[string]bool{
+		"Receipt":          true,
+		"block_info_roots": true,
+		"CanonicalHeader":  true, // Critical: block_num -> canonical_header_hash mapping
+	}
+
 	for i, blockData := range preservedData {
 		if i%1000 == 0 {
 			fmt.Printf("Restoring block %d (%d/%d)...\n", blockData.BlockNo, i+1, len(preservedData))
@@ -169,9 +215,25 @@ func restoreBlockData(tx kv.RwTx, preservedData []BlockData) error {
 
 		// Restore data to each table
 		for table, data := range blockData.Data {
-			err := tx.Put(table, blockKey, data)
-			if err != nil {
-				return fmt.Errorf("failed to restore block %d to table %s: %w", blockData.BlockNo, table, err)
+			if simpleTables[table] {
+				// Simple table: direct key-value restoration
+				err := tx.Put(table, blockKey, data)
+				if err != nil {
+					return fmt.Errorf("failed to restore block %d to simple table %s: %w", blockData.BlockNo, table, err)
+				}
+			} else {
+				// Composite/special table: deserialize and restore multiple entries
+				entries, err := deserializeEntries(data)
+				if err != nil {
+					return fmt.Errorf("failed to deserialize data for table %s block %d: %w", table, blockData.BlockNo, err)
+				}
+
+				for _, entry := range entries {
+					err := tx.Put(table, entry.Key, entry.Value)
+					if err != nil {
+						return fmt.Errorf("failed to restore entry to table %s block %d: %w", table, blockData.BlockNo, err)
+					}
+				}
 			}
 		}
 	}
@@ -194,4 +256,99 @@ func restoreBatchMetadata(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFr
 
 	fmt.Printf("Batch metadata restoration completed\n")
 	return nil
+}
+
+// copyCompositeKeyData copies all entries from a table that start with the given block key prefix
+func copyCompositeKeyData(tx kv.RwTx, tableName string, blockKey []byte) ([]KeyValueEntry, error) {
+	cursor, err := tx.Cursor(tableName)
+	if err != nil {
+		return nil, err // Table might not exist
+	}
+	defer cursor.Close()
+
+	var entries []KeyValueEntry
+
+	// Find all keys starting with the block number prefix
+	for key, value, err := cursor.Seek(blockKey); key != nil; key, value, err = cursor.Next() {
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if key starts with our block prefix
+		if len(key) < len(blockKey) || !bytes.HasPrefix(key, blockKey) {
+			break // No more entries for this block
+		}
+
+		entries = append(entries, KeyValueEntry{
+			Key:   common.Copy(key),
+			Value: common.Copy(value),
+		})
+	}
+
+	return entries, nil
+}
+
+// copyHeaderNumberData copies HeaderNumber entries for a specific block (header_hash -> block_num mapping)
+func copyHeaderNumberData(tx kv.RwTx, blockNo uint64) ([]KeyValueEntry, error) {
+	cursor, err := tx.Cursor("HeaderNumber")
+	if err != nil {
+		return nil, err // Table might not exist
+	}
+	defer cursor.Close()
+
+	targetBlockBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(targetBlockBytes, blockNo)
+
+	var entries []KeyValueEntry
+
+	// Find all entries where value equals our target block number
+	for key, value, err := cursor.First(); key != nil; key, value, err = cursor.Next() {
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if value equals our target block number
+		if len(value) == 8 && bytes.Equal(value, targetBlockBytes) {
+			entries = append(entries, KeyValueEntry{
+				Key:   common.Copy(key),
+				Value: common.Copy(value),
+			})
+		}
+	}
+
+	return entries, nil
+}
+
+// serializeEntries serializes multiple key-value entries into a single byte array
+func serializeEntries(entries []KeyValueEntry) []byte {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+
+	if err := encoder.Encode(entries); err != nil {
+		// If serialization fails, return empty data
+		return nil
+	}
+
+	return buf.Bytes()
+}
+
+// deserializeEntries deserializes a byte array back into key-value entries
+func deserializeEntries(data []byte) ([]KeyValueEntry, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var entries []KeyValueEntry
+	buf := bytes.NewBuffer(data)
+	decoder := gob.NewDecoder(buf)
+
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
 }
