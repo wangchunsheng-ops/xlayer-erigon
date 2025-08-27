@@ -9,7 +9,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv"
 	kafkaTypes "github.com/ledgerwatch/erigon/zk/realtime/kafka/types"
 	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
-	"github.com/ledgerwatch/erigon/zkevm/log"
+	"github.com/ledgerwatch/log/v3"
 )
 
 const (
@@ -337,7 +337,7 @@ func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockConte
 	}
 	cache.PutHighestConfirmHeight(pendingBlockContext.blockNum)
 	cache.State.FlushState(pendingBlockContext.pendingStateCache.cache)
-	log.Debug(fmt.Sprintf("[Realtime] Closed block %d, pending blocks queue size: %d", pendingBlockContext.blockNum, cache.pendingBlocks.Size()))
+	log.Info(fmt.Sprintf("[Realtime] Closed block %d, pending blocks queue size: %d", pendingBlockContext.blockNum, cache.pendingBlocks.Size()))
 }
 
 // -------------- Debug operations --------------
