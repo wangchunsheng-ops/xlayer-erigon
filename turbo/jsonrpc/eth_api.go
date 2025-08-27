@@ -386,16 +386,17 @@ type APIImpl struct {
 	LogsMaxRange                  uint64
 
 	// For X Layer
-	dbsmt              kv.RoDB
-	L2GasPricer        gasprice.L2GasPricer
-	EnableInnerTx      bool
-	PreRunList         map[common.Address]struct{}
-	preRunProcessor    *PreRunProcessor
-	BulkAddTxs         bool
-	BulkAddTxsSize     int
-	BulkAddTxsWaitTime time.Duration
-	txChan             chan txRequest
-	EnableNotify       bool
+	dbsmt                kv.RoDB
+	L2GasPricer          gasprice.L2GasPricer
+	EnableInnerTx        bool
+	PreRunList           map[common.Address]struct{}
+	preRunProcessor      *PreRunProcessor
+	BulkAddTxs           bool
+	BulkAddTxsSize       int
+	BulkAddTxsWaitTime   time.Duration
+	txChan               chan txRequest
+	EnableNotify         bool
+	DynamicBlockGasLimit uint64
 }
 
 // For X Layer, split db and ac
@@ -437,15 +438,16 @@ func NewEthAPI(base *BaseAPI, db kv.RoDB, dbsmt kv.RoDB, eth rpchelper.ApiBacken
 		RejectLowGasPriceTolerance:    ethCfg.RejectLowGasPriceTolerance,
 
 		// For X Layer
-		L2GasPricer:        gasprice.NewL2GasPriceSuggester(context.Background(), ethCfg.GPO),
-		EnableInnerTx:      ethCfg.XLayer.EnableInnerTx,
-		PreRunList:         ethCfg.XLayer.PreRunList,
-		BulkAddTxs:         ethCfg.XLayer.BulkAddTxs,
-		BulkAddTxsSize:     ethCfg.XLayer.BulkAddTxsSize,
-		BulkAddTxsWaitTime: ethCfg.XLayer.BulkAddTxsWaitTime,
-		EnableNotify:       ethCfg.XLayer.EnableAddTxNotify,
-		txChan:             make(chan txRequest, 1000),
-		dbsmt:              dbsmt,
+		L2GasPricer:          gasprice.NewL2GasPriceSuggester(context.Background(), ethCfg.GPO),
+		EnableInnerTx:        ethCfg.XLayer.EnableInnerTx,
+		PreRunList:           ethCfg.XLayer.PreRunList,
+		BulkAddTxs:           ethCfg.XLayer.BulkAddTxs,
+		BulkAddTxsSize:       ethCfg.XLayer.BulkAddTxsSize,
+		BulkAddTxsWaitTime:   ethCfg.XLayer.BulkAddTxsWaitTime,
+		EnableNotify:         ethCfg.XLayer.EnableAddTxNotify,
+		DynamicBlockGasLimit: ethCfg.Zk.XLayer.DynamicBlockGasLimit,
+		txChan:               make(chan txRequest, 1000),
+		dbsmt:                dbsmt,
 	}
 
 	// For X Layer

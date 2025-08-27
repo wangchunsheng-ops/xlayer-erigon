@@ -116,9 +116,16 @@ func (api *RealtimeAPIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi.C
 
 	// Determine the highest gas limit can be used during the estimation.
 	if args.Gas != nil && uint64(*args.Gas) >= params.TxGas {
+		if uint64(*args.Gas) > api.DynamicBlockGasLimit {
+			return 0, fmt.Errorf("gas limit exceeds block gas limit %d", api.DynamicBlockGasLimit)
+		}
 		hi = uint64(*args.Gas)
 	} else {
-		hi = header.GasLimit
+		if api.DynamicBlockGasLimit > 0 {
+			hi = api.DynamicBlockGasLimit
+		} else {
+			hi = header.GasLimit
+		}
 	}
 
 	var feeCap *big.Int
