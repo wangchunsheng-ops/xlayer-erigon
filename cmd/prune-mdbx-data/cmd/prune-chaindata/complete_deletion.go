@@ -348,149 +348,41 @@ func dropTableForPruning(tx kv.RwTx, tableName string) error {
 
 // getPruneTables returns tables to be pruned based on level
 func getPruneTables(allTables []string, level PruneLevel) []string {
-	categories := getTableCategories()
 	critical := getCriticalTables()
-
 	var toDelete []string
+
+	// Simplified deletion strategy - only delete tables that actually have significant data
+	// Based on actual database analysis, most tables are empty or have minimal data
+	actualDataTables := []string{
+		"BlockTransaction",         // Complete transaction RLP data (redundant with BlockBody)
+		"BlockTransactionLookup",   // Hash-to-block lookup index
+		"hermez_txPricePercentage", // Transaction pricing data
+		"LogTopicIndex",            // Log topic index
+		"AccountHistory",           // Account history data
+		"CallFromIndex",            // Call from index
+		"CallToIndex",              // Call to index
+		"CallTraceSet",             // Call trace set
+		"LogAddressIndex",          // Log address index
+	}
 
 	switch level {
 	case PruneLevelModerate:
-		// Moderate: delete non-essential tables but preserve critical ChangeSet tables
-
-		// Delete non-essential tables (but preserve StorageChangeSet and AccountChangeSet)
-		deleteCategories := []string{"Index Tables", "Trie Tables", "Beacon Tables"}
-		for _, category := range deleteCategories {
-			if tables, exists := categories[category]; exists {
-				for _, table := range tables {
-					if !critical[table] && contains(allTables, table) {
-						toDelete = append(toDelete, table)
-					}
-				}
+		// Moderate: Only delete the tables that actually have data and are safe to remove
+		for _, table := range actualDataTables {
+			// Exclude tables that are critical or should be handled by partial pruning
+			if !critical[table] && contains(allTables, table) {
+				toDelete = append(toDelete, table)
 			}
 		}
-
-		// Delete specific History Data Tables but preserve the critical ChangeSet tables
-		if tables, exists := categories["History Data Tables"]; exists {
-			for _, table := range tables {
-				// CRITICAL: Only delete these in Aggressive mode, NOT in Moderate mode
-				if table == "StorageChangeSet" || table == "AccountChangeSet" {
-					continue // Skip in moderate mode
-				}
-				if !critical[table] && contains(allTables, table) {
-					toDelete = append(toDelete, table)
-				}
-			}
-		}
-
-		// Additional deletes for Moderate mode - transaction lookup optimization tables
-		// For sequence nodes: these tables provide query optimization but BlockBody already contains transactions
-		transactionOptimizationDeletes := []string{
-			"BlockTransaction",         // Complete transaction RLP data (redundant with BlockBody)
-			"BlockTransactionLookup",   // Hash-to-block lookup index (not essential for sequence nodes)
-			"hermez_txPricePercentage", // Transaction pricing data (for RPC queries only, not core functionality)
-		}
-
-		// Add transaction optimization tables to delete list
-		for _, table := range transactionOptimizationDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
-
-		// Start with diagnostic tables that are obviously safe
-		diagnosticDeletes := []string{
-			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
-			"just_unwound", "PoolLimbo",
-		}
-
-		for _, table := range diagnosticDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
-
-		// Note: Block data tables (BlockBody, Receipt, Header, TransactionLog, etc.) will be handled by batch-based pruning
-		// This allows keeping recent data while removing old data, perfect for sequencer nodes
 
 	case PruneLevelAggressive:
-		// Aggressive: all moderate deletions + partial cleanup of ChangeSet tables
-
-		// Include all moderate mode deletions first
-		deleteCategories := []string{"Index Tables", "Trie Tables", "Beacon Tables"}
-		for _, category := range deleteCategories {
-			if tables, exists := categories[category]; exists {
-				for _, table := range tables {
-					if !critical[table] && contains(allTables, table) {
-						toDelete = append(toDelete, table)
-					}
-				}
+		// Aggressive: Same tables as moderate mode for complete deletion
+		// Additional AccountChangeSet and StorageChangeSet will be handled by partial cleanup
+		for _, table := range actualDataTables {
+			if !critical[table] && contains(allTables, table) {
+				toDelete = append(toDelete, table)
 			}
 		}
-
-		// Include ALL History Data Tables EXCEPT ChangeSet tables (which get special partial processing)
-		if tables, exists := categories["History Data Tables"]; exists {
-			for _, table := range tables {
-				// IMPORTANT: StorageChangeSet and AccountChangeSet get partial cleanup via pruneHistoricalDupCursorData
-				// Don't add them to full deletion list to avoid double processing
-				if table == "StorageChangeSet" || table == "AccountChangeSet" {
-					continue // Will be handled by pruneHistoricalDupCursorData for partial cleanup
-				}
-				if !critical[table] && contains(allTables, table) {
-					toDelete = append(toDelete, table)
-				}
-			}
-		}
-
-		// Include moderate mode's transaction optimization tables
-		transactionOptimizationDeletes := []string{
-			"BlockTransaction",         // Complete transaction RLP data (redundant with BlockBody)
-			"BlockTransactionLookup",   // Hash-to-block lookup index (not essential for sequence nodes)
-			"hermez_txPricePercentage", // Transaction pricing data (for RPC queries only, not core functionality)
-		}
-
-		// Add transaction optimization tables to delete list
-		for _, table := range transactionOptimizationDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
-
-		// Add diagnostic tables
-		diagnosticDeletes := []string{
-			"bad_tx_hashes", "discarded_transactions_by_block", "discarded_transactions_by_hash",
-			"just_unwound", "PoolLimbo",
-		}
-
-		for _, table := range diagnosticDeletes {
-			if !critical[table] {
-				for _, existingTable := range allTables {
-					if existingTable == table {
-						toDelete = append(toDelete, table)
-						break
-					}
-				}
-			}
-		}
-
-		// Aggressive mode specific: add state-related tables for partial cleanup
-		// AccountChangeSet and StorageChangeSet will be handled specially in batch-based pruning
-		// to preserve recent data while removing historical data
-
 	}
 
 	return toDelete

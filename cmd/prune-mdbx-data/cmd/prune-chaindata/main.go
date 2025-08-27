@@ -322,7 +322,8 @@ func main() {
 	fmt.Printf("Critical tables (will be preserved): %d\n", len(critical))
 
 	if len(toDelete) == 0 {
-		fmt.Printf("No tables found for deletion\n")
+		fmt.Printf("No tables found for deletion (target tables are empty or don't exist with data)\n")
+		fmt.Printf("Target tables for complete deletion: BlockTransaction, BlockTransactionLookup, hermez_txPricePercentage, LogTopicIndex, AccountHistory, CallFromIndex, CallToIndex, CallTraceSet, LogAddressIndex\n")
 		return
 	}
 
@@ -373,12 +374,10 @@ func main() {
 	switch pruneLevel {
 	case PruneLevelModerate:
 		fmt.Printf("Moderate pruning: Comprehensive cleanup with batch-based optimization\n")
-		fmt.Printf("Strategy: Delete unnecessary tables + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
+		fmt.Printf("Strategy: Delete specific tables with actual data + batch-based pruning (keep recent %d batches)\n", keepRecentBatches)
 		fmt.Printf("Preserves: Recent batch data, core state data, zkEVM operational tables\n")
-		fmt.Printf("Deletes: History (%d), Index (%d), Trie (%d), Beacon (%d), Transaction optimization (3), Diagnostic (5), + old batch data\n",
-			getTableCategoryCount("History Data Tables"), getTableCategoryCount("Index Tables"),
-			getTableCategoryCount("Trie Tables"), getTableCategoryCount("Beacon Tables"))
-		fmt.Printf("🎯 zkEVM optimized: Complete cleanup for sequence nodes (deletes BlockTransaction + lookup + pricing tables)\n")
+		fmt.Printf("Deletes: 9 tables with actual data (BlockTransaction, BlockTransactionLookup, hermez_txPricePercentage, LogTopicIndex, AccountHistory, CallFromIndex, CallToIndex, CallTraceSet, LogAddressIndex) + old batch data\n")
+		fmt.Printf("🎯 zkEVM optimized: Simplified cleanup for sequence nodes (only deletes tables that actually have significant data)\n")
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	case PruneLevelAggressive:
