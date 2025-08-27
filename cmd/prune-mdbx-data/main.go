@@ -79,7 +79,7 @@ func runPruneChaindata(args []string) {
 	}
 
 	// Build the command
-	buildCmd := exec.Command("go", "build", "-o", "prune-chaindata-tool", "main.go")
+	buildCmd := exec.Command("go", "build", "-o", "prune-chaindata-tool", ".")
 	if err := buildCmd.Run(); err != nil {
 		fmt.Printf("Error: failed to build prune-chaindata: %v\n", err)
 		os.Exit(1)
