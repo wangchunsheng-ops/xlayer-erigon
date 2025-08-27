@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/zk/hermez_db"
@@ -16,6 +17,22 @@ import (
 func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64, fastMode bool, safeFastMode bool) (int, error) {
 	fmt.Printf("Starting historical dupCursor data cleanup (keeping recent %d batches)...\n", keepRecentBatches)
 	fmt.Printf("Note: Only processing AccountChangeSet and StorageChangeSet - CanonicalHeader and hermez_blockBatches preserved for node stability\n")
+
+	// Check if required tables exist before attempting to process them
+	accountTableExists, err := checkTableExists(tx, "AccountChangeSet")
+	if err != nil {
+		return 0, fmt.Errorf("failed to check AccountChangeSet table: %w", err)
+	}
+
+	storageTableExists, err := checkTableExists(tx, "StorageChangeSet")
+	if err != nil {
+		return 0, fmt.Errorf("failed to check StorageChangeSet table: %w", err)
+	}
+
+	if !accountTableExists && !storageTableExists {
+		fmt.Printf("Neither AccountChangeSet nor StorageChangeSet tables exist - skipping dupCursor cleanup\n")
+		return 0, nil
+	}
 
 	// Get the range of blocks to delete (everything except recent batches)
 	latestBlock, err := getLatestBlockNumber(tx)
@@ -54,21 +71,29 @@ func pruneHistoricalDupCursorData(tx kv.RwTx, keepRecentBatches uint64, fastMode
 
 	deletedRecords := 0
 
-	// Clean AccountChangeSet data (dupCursor table)
-	accountDeletedCount, err := pruneAccountChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
-	if err != nil {
-		return deletedRecords, fmt.Errorf("failed to prune AccountChangeSet: %w", err)
+	// Clean AccountChangeSet data (dupCursor table) - only if table exists
+	if accountTableExists {
+		accountDeletedCount, err := pruneAccountChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
+		if err != nil {
+			return deletedRecords, fmt.Errorf("failed to prune AccountChangeSet: %w", err)
+		}
+		deletedRecords += accountDeletedCount
+		fmt.Printf("✓ Deleted %d AccountChangeSet records\n", accountDeletedCount)
+	} else {
+		fmt.Printf("⚠️  Skipping AccountChangeSet - table does not exist\n")
 	}
-	deletedRecords += accountDeletedCount
-	fmt.Printf("✓ Deleted %d AccountChangeSet records\n", accountDeletedCount)
 
-	// Clean StorageChangeSet data (dupCursor table)
-	storageDeletedCount, err := pruneStorageChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
-	if err != nil {
-		return deletedRecords, fmt.Errorf("failed to prune StorageChangeSet: %w", err)
+	// Clean StorageChangeSet data (dupCursor table) - only if table exists
+	if storageTableExists {
+		storageDeletedCount, err := pruneStorageChangeSetBeforeBlockOptimized(tx, cutoffBlock, fastMode, safeFastMode)
+		if err != nil {
+			return deletedRecords, fmt.Errorf("failed to prune StorageChangeSet: %w", err)
+		}
+		deletedRecords += storageDeletedCount
+		fmt.Printf("✓ Deleted %d StorageChangeSet records\n", storageDeletedCount)
+	} else {
+		fmt.Printf("⚠️  Skipping StorageChangeSet - table does not exist\n")
 	}
-	deletedRecords += storageDeletedCount
-	fmt.Printf("✓ Deleted %d StorageChangeSet records\n", storageDeletedCount)
 
 	// Note: CanonicalHeader and hermez_blockBatches are NOT processed here
 	// These tables are critical for node operation and are preserved for stability
@@ -102,16 +127,20 @@ func pruneAccountChangeSetBeforeBlockOptimized(tx kv.RwTx, cutoffBlock uint64, f
 	fmt.Printf("🔄 Processing AccountChangeSet (batch size: %d)...\n", batchSize)
 
 	// Process in batches to optimize memory usage
+	// Start from the first position
+	startKey, _, err := cursor.First()
+	if err != nil {
+		return deletedCount, fmt.Errorf("failed to move cursor to first position: %w", err)
+	}
+	if startKey == nil {
+		// Table is empty, nothing to process
+		fmt.Printf("AccountChangeSet table is empty, nothing to prune\n")
+		return 0, nil
+	}
+
 	for {
 		var keysToDelete [][]byte
 		currentBatchSize := 0
-
-		// Collect a batch of keys to delete
-		startKey, _, _ := cursor.Current()
-		if startKey == nil {
-			// Start from beginning if no current position
-			startKey, _, _ = cursor.First()
-		}
 
 		for key, _, err := cursor.Current(); key != nil && currentBatchSize < batchSize; {
 			if err != nil {
@@ -193,7 +222,7 @@ func pruneAccountChangeSetBeforeBlockFast(tx kv.RwTx, cutoffBlock uint64, cursor
 	// Direct deletion approach - faster but more aggressive
 	for key, _, err := cursor.First(); key != nil; {
 		if err != nil {
-			return deletedCount, err
+			return deletedCount, fmt.Errorf("cursor operation failed: %w", err)
 		}
 
 		if len(key) >= 8 {
@@ -372,15 +401,20 @@ func pruneStorageChangeSetBeforeBlockOptimized(tx kv.RwTx, cutoffBlock uint64, f
 	fmt.Printf("🔄 Processing StorageChangeSet (batch size: %d)...\n", batchSize)
 
 	// Process in batches to optimize memory usage
+	// Start from the first position
+	startKey, _, err := cursor.First()
+	if err != nil {
+		return deletedCount, fmt.Errorf("failed to move cursor to first position: %w", err)
+	}
+	if startKey == nil {
+		// Table is empty, nothing to process
+		fmt.Printf("StorageChangeSet table is empty, nothing to prune\n")
+		return 0, nil
+	}
+
 	for {
 		var keysToDelete [][]byte
 		currentBatchSize := 0
-
-		// Position cursor at start or continue from current position
-		if processedRecords == 0 {
-			// Start from beginning
-			cursor.First()
-		}
 
 		// Collect a batch of keys to delete
 		// StorageChangeSet key format: block_number + address + incarnation + storage_key
@@ -449,7 +483,7 @@ func pruneStorageChangeSetBeforeBlockFast(tx kv.RwTx, cutoffBlock uint64, cursor
 	// StorageChangeSet key format: block_number + address + incarnation + storage_key
 	for key, _, err := cursor.First(); key != nil; {
 		if err != nil {
-			return deletedCount, err
+			return deletedCount, fmt.Errorf("cursor operation failed: %w", err)
 		}
 
 		if len(key) >= 8 {
@@ -655,4 +689,29 @@ func pruneHermezBlockBatchesBeforeBlock(tx kv.RwTx, cutoffBlock uint64) (int, er
 	}
 
 	return deletedCount, nil
+}
+
+// checkTableExists verifies if a table exists in the database
+// This prevents MDBX cursor errors when trying to access non-existent tables
+func checkTableExists(tx kv.RwTx, tableName string) (bool, error) {
+	// Try to create a cursor for the table
+	cursor, err := tx.Cursor(tableName)
+	if err != nil {
+		// If we can't create a cursor, the table likely doesn't exist
+		// Check if it's a "table not found" type error
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "not found") ||
+			strings.Contains(err.Error(), "no such table") ||
+			strings.Contains(err.Error(), "MDB_NOTFOUND") {
+			return false, nil // Table doesn't exist, but this is not an error
+		}
+		// Other errors are actual problems
+		return false, fmt.Errorf("failed to check table existence: %w", err)
+	}
+
+	// Close the cursor immediately
+	cursor.Close()
+
+	// If we got here, the table exists
+	return true, nil
 }
