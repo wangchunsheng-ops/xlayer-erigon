@@ -438,6 +438,21 @@ func main() {
 			// Continue with regular deletion instead of exiting
 		} else {
 			fmt.Printf("✓ Batch-based pruning completed successfully!\n")
+
+			// Commit batch operations to avoid huge transaction
+			fmt.Printf("Committing batch operations...\n")
+			if commitErr := tx.Commit(); commitErr != nil {
+				log.Error("Failed to commit batch operations", "error", commitErr)
+				os.Exit(1)
+			}
+
+			// Start new transaction for remaining operations
+			tx, err = chaindb.BeginRw(ctx)
+			if err != nil {
+				log.Error("Failed to start new transaction", "error", err)
+				os.Exit(1)
+			}
+			fmt.Printf("✓ Batch operations committed, continuing with table deletions\n")
 		}
 
 		// Additional aggressive mode: clean historical dupCursor data
@@ -512,13 +527,15 @@ func main() {
 		deletedCount = 0
 	}
 
-	// Commit transaction
+	// First commit: table deletion operations
+	fmt.Printf("Committing table deletion operations...\n")
 	err = tx.Commit()
 	if err != nil {
-		log.Error("Failed to commit transaction", "error", err)
+		log.Error("Failed to commit table deletions", "error", err)
 		tx.Rollback()
 		os.Exit(1)
 	}
+	fmt.Printf("✓ Table deletions committed successfully\n")
 
 	// Calculate space savings with overflow protection
 	var batchDeletedSize uint64
@@ -572,12 +589,4 @@ func main() {
 	fmt.Printf("Database size after pruning: %s\n", datasize.ByteSize(remainingSize).HumanReadable())
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
 
-	// Commit the transaction to persist all changes
-	fmt.Printf("\n=== Committing Changes ===\n")
-	if err := tx.Commit(); err != nil {
-		log.Error("Failed to commit transaction", "error", err)
-		fmt.Printf("ERROR: Failed to commit changes: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✓ All changes committed successfully\n")
 }
