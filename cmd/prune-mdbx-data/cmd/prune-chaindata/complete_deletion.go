@@ -64,16 +64,29 @@ func executeOptimizedTableDeletion(
 	// Strategy 2: Individual NoSync transactions for large tables (balanced)
 	if len(largeTables) > 0 {
 		fmt.Printf("⚡ Processing %d large tables with NoSync transactions...\n", len(largeTables))
+
+		// Commit current transaction before NoSync operations
+		if err := mainTx.Commit(); err != nil {
+			return deletedCount, actuallyDeletedTables, actualDeletedSize
+		}
+
 		largeDeleted, largeActual, largeSize := deleteLargeTablesWithNoSync(chaindb, largeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
 		deletedCount += largeDeleted
 		actuallyDeletedTables += largeActual
 		actualDeletedSize += largeSize
+
+		// Restart transaction for remaining operations
+		var err error
+		mainTx, err = chaindb.BeginRw(context.Background())
+		if err != nil {
+			return deletedCount, actuallyDeletedTables, actualDeletedSize
+		}
 	}
 
 	// Strategy 3: Optimized huge table deletion with DropBucket (most aggressive)
 	if len(hugeTables) > 0 {
 		fmt.Printf("🔥 Processing %d huge tables with optimized Drop strategy...\n", len(hugeTables))
-		hugeDeleted, hugeActual, hugeSize := deleteHugeTablesOptimized(chaindb, hugeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
+		hugeDeleted, hugeActual, hugeSize := deleteHugeTablesOptimized(mainTx, hugeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
 		deletedCount += hugeDeleted
 		actuallyDeletedTables += hugeActual
 		actualDeletedSize += hugeSize
@@ -152,8 +165,6 @@ func deleteLargeTablesWithNoSync(
 	actuallyDeletedTables := 0
 	var actualDeletedSize uint64
 
-	ctx := context.Background()
-
 	for i, tableInfo := range largeTables {
 		table := tableInfo.name
 
@@ -174,7 +185,7 @@ func deleteLargeTablesWithNoSync(
 			i+1, len(largeTables), table, datasize.ByteSize(stats.sizeBytes).HumanReadable())
 
 		// Use NoSync transaction for better performance
-		err := chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
+		err := chaindb.UpdateNosync(context.Background(), func(tx kv.RwTx) error {
 			return tx.ClearBucket(table)
 		})
 
@@ -197,7 +208,7 @@ func deleteLargeTablesWithNoSync(
 
 // deleteHugeTablesOptimized uses the most aggressive deletion strategy for huge tables
 func deleteHugeTablesOptimized(
-	chaindb kv.RwDB,
+	tx kv.RwTx,
 	hugeTables []tableSizeInfo,
 	preCollectedStats map[string]struct {
 		entries   uint64
@@ -211,8 +222,6 @@ func deleteHugeTablesOptimized(
 	deletedCount := 0
 	actuallyDeletedTables := 0
 	var actualDeletedSize uint64
-
-	ctx := context.Background()
 
 	for i, tableInfo := range hugeTables {
 		table := tableInfo.name
@@ -246,18 +255,14 @@ func deleteHugeTablesOptimized(
 			fmt.Printf("🗑️  Using Drop+Recreate strategy for %s...\n", table)
 
 			// Use Drop strategy - this is much faster for huge tables
-			err = chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
-				// First mark the table as deprecated temporarily to allow drop
-				return dropTableForPruning(tx, table)
-			})
+			// First mark the table as deprecated temporarily to allow drop
+			err = dropTableForPruning(tx, table)
 		} else {
 			strategy = "clear"
 			fmt.Printf("🧹 Using Clear strategy for %s (table must be preserved)...\n", table)
 
 			// Fall back to clear strategy
-			err = chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
-				return tx.ClearBucket(table)
-			})
+			err = tx.ClearBucket(table)
 		}
 
 		if err != nil {
