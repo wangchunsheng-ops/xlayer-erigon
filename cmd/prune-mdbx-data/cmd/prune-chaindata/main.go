@@ -572,4 +572,12 @@ func main() {
 	fmt.Printf("Database size after pruning: %s\n", datasize.ByteSize(remainingSize).HumanReadable())
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
 
+	// Commit the transaction to persist all changes
+	fmt.Printf("\n=== Committing Changes ===\n")
+	if err := tx.Commit(); err != nil {
+		log.Error("Failed to commit transaction", "error", err)
+		fmt.Printf("ERROR: Failed to commit changes: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ All changes committed successfully\n")
 }
