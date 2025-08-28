@@ -1690,10 +1690,10 @@ func dumpState(chaindata string) error {
 }
 
 type accInfo struct {
-	Balance string            `json:"balance"`
-	Nonce   string            `json:"nonce"`
-	Code    string            `json:"code"`
-	Storage map[string]string `json:"storage"`
+	Balance string            `json:"balance,omitempty"`
+	Nonce   string            `json:"nonce,omitempty"`
+	Code    string            `json:"code,omitempty"`
+	Storage map[string]string `json:"storage,omitempty"`
 }
 
 /*
