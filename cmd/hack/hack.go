@@ -541,7 +541,7 @@ func migrateGenesis(chaindata, input, output string) error {
 
 		log.Debug("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
 		if acc_addr == state.ADDRESS_SCALABLE_L2 {
-			fmt.Printf("SCALABEL incarnation: %v\n", a.Incarnation)
+			fmt.Printf("SCALABLE incarnation: %v\n", a.Incarnation)
 		}
 
 		// otherwise, get code and storage
@@ -1765,11 +1765,11 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		}
 		if *ignoreScalable && address == state.ADDRESS_SCALABLE_L2 {
 			fmt.Printf("Ignoring scalable address: %s\n", address.String())
-
+			numValsOverridden := 0
 			if value.Storage != nil {
 				storageChanges[address] = make(map[string]string)
 				fmt.Printf("number of Storage items for account %s: %d\n", address.Hex(), len(value.Storage))
-				for k, _ := range value.Storage {
+				for k, valInGenesis := range value.Storage {
 					keyHash := libcommon.HexToHash(k)
 					valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
 					if err != nil {
@@ -1777,11 +1777,17 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 						return err
 					}
 					valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
-					storageChanges[address][k] = valInSmtHex
-					//fmt.Printf("key: %s, valInSmt: %s, valInGenesise: %s \n", k, valInSmtHex, v)
+
+					if valInSmtHex != "0x0000000000000000000000000000000000000000000000000000000000000000" && valInSmtHex != valInGenesis {
+						storageChanges[address][k] = valInSmtHex
+						fmt.Printf("key: %s, valInSmt: %s, valInGenesis: %s \n", k, valInSmtHex, valInGenesis)
+						numValsOverridden++
+					} else {
+						storageChanges[address][k] = valInGenesis
+					}
 				}
 			}
-			fmt.Printf("Finish override scalable storages with original storage\n")
+			fmt.Printf("Finish override scalable storages with original storage (%d valuess overridden)\n", numValsOverridden)
 			continue
 		}
 		if value.Storage != nil {
