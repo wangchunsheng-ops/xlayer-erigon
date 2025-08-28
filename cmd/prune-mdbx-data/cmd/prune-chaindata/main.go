@@ -284,7 +284,11 @@ func main() {
 		log.Error("Failed to open chaindata db", "error", err)
 		os.Exit(1)
 	}
-	defer chaindb.Close()
+	defer func() {
+		fmt.Printf("Closing database safely...\n")
+		chaindb.Close()
+		fmt.Printf("✓ Database closed successfully\n")
+	}()
 
 	log.Info("Chaindata database opened successfully")
 
@@ -419,61 +423,16 @@ func main() {
 		fmt.Printf("Auto-confirmed with --yes flag\n")
 	}
 
-	// Begin write transaction
+	// Execute batch operations with guaranteed commit
 	ctx := context.Background()
-	tx, err := chaindb.BeginRw(ctx)
-	if err != nil {
-		log.Error("Failed to start write transaction", "error", err)
-		os.Exit(1)
-	}
-	defer tx.Rollback()
-
-	// Perform batch-based pruning for moderate and aggressive levels
 	var deletedBatches, deletedBlocks int
 	if pruneLevel == PruneLevelModerate || pruneLevel == PruneLevelAggressive {
-		fmt.Printf("\n=== Executing Batch-based Pruning Strategy ===\n")
-		deletedBatches, deletedBlocks, err = partialPruneBatchTables(tx, keepRecentBatches)
-		if err != nil {
-			log.Error("Failed to perform batch-based pruning", "error", err)
-			// Continue with regular deletion instead of exiting
-		} else {
-			fmt.Printf("✓ Batch-based pruning completed successfully!\n")
+		deletedBatches, deletedBlocks = executeBatchOperationsWithCommit(chaindb, keepRecentBatches, ctx)
+	}
 
-			// Commit batch operations to avoid huge transaction
-			fmt.Printf("Committing batch operations...\n")
-			if commitErr := tx.Commit(); commitErr != nil {
-				log.Error("Failed to commit batch operations", "error", commitErr)
-				os.Exit(1)
-			}
-
-			// Start new transaction for remaining operations
-			tx, err = chaindb.BeginRw(ctx)
-			if err != nil {
-				log.Error("Failed to start new transaction", "error", err)
-				os.Exit(1)
-			}
-			fmt.Printf("✓ Batch operations committed, continuing with table deletions\n")
-		}
-
-		// Additional aggressive mode: clean historical dupCursor data
-		if pruneLevel == PruneLevelAggressive {
-			fmt.Printf("\n=== Executing Aggressive DupCursor Data Cleanup ===\n")
-			fmt.Printf("Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet\n")
-			fmt.Printf("Note: CanonicalHeader and hermez_blockBatches are preserved for node stability\n")
-			if fastDupCursorMode {
-				fmt.Printf("⚡ Fast dupCursor mode enabled: using direct cursor deletion for maximum performance\n")
-			} else if safeFastMode {
-				fmt.Printf("🛡️⚡ Safe-Fast dupCursor mode enabled: balanced performance and safety\n")
-			} else {
-				fmt.Printf("🔄 Standard dupCursor mode: using optimized batch processing for safety\n")
-			}
-			deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches, fastDupCursorMode, safeFastMode)
-			if err != nil {
-				log.Error("Failed to perform dupCursor data cleanup", "error", err)
-			} else {
-				fmt.Printf("✓ Historical dupCursor data cleanup completed: %d records deleted\n", deletedDupCursorRecords)
-			}
-		}
+	// Execute dupCursor operations with guaranteed commit (Aggressive mode only)
+	if pruneLevel == PruneLevelAggressive {
+		executeDupCursorOperationsWithCommit(chaindb, keepRecentBatches, fastDupCursorMode, safeFastMode, ctx)
 	}
 
 	// Filter out block tables from full deletion if we did partial pruning
@@ -519,23 +478,9 @@ func main() {
 
 	fmt.Printf("🗂️ Processing %d tables in optimized order (small to large)...\n", len(sortedTables))
 
-	// Use optimized deletion strategy
-	deletedCount, actuallyDeletedTables, actualDeletedSize = executeOptimizedTableDeletion(
-		tx, chaindb, sortedTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
-	if deletedCount < 0 {
-		// Error occurred, but continue with transaction commit for any successful operations
-		deletedCount = 0
-	}
-
-	// First commit: table deletion operations
-	fmt.Printf("Committing table deletion operations...\n")
-	err = tx.Commit()
-	if err != nil {
-		log.Error("Failed to commit table deletions", "error", err)
-		tx.Rollback()
-		os.Exit(1)
-	}
-	fmt.Printf("✓ Table deletions committed successfully\n")
+	// Execute table deletion operations with guaranteed commit
+	deletedCount, actuallyDeletedTables, actualDeletedSize = executeTableDeletionsWithCommit(
+		chaindb, sortedTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log, ctx)
 
 	// Calculate space savings with overflow protection
 	var batchDeletedSize uint64
@@ -589,4 +534,123 @@ func main() {
 	fmt.Printf("Database size after pruning: %s\n", datasize.ByteSize(remainingSize).HumanReadable())
 	fmt.Printf("Pruning level: %s\n", getPruneLevelName(pruneLevel))
 
+	fmt.Printf("\n=== Cleanup Complete ===\n")
+	fmt.Printf("✓ Pruning operation completed successfully\n")
+	fmt.Printf("✓ All changes have been committed to database\n")
+}
+
+// executeBatchOperationsWithCommit executes batch operations with guaranteed commit
+func executeBatchOperationsWithCommit(chaindb kv.RwDB, keepRecentBatches uint64, ctx context.Context) (int, int) {
+	fmt.Printf("\n=== Phase 1: Batch-based Pruning ===\n")
+
+	tx, err := chaindb.BeginRw(ctx)
+	if err != nil {
+		logv3.Error("Failed to start transaction for batch operations", "error", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		fmt.Printf("Committing Phase 1 (batch operations)...\n")
+		if err := tx.Commit(); err != nil {
+			logv3.Error("Failed to commit batch operations", "error", err)
+			tx.Rollback()
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Phase 1 committed successfully\n")
+	}()
+
+	deletedBatches, deletedBlocks, err := partialPruneBatchTables(tx, keepRecentBatches)
+	if err != nil {
+		logv3.Error("Failed to perform batch-based pruning", "error", err)
+		return 0, 0
+	}
+
+	fmt.Printf("✓ Batch-based pruning completed successfully!\n")
+	return deletedBatches, deletedBlocks
+}
+
+// executeDupCursorOperationsWithCommit executes dupCursor operations with guaranteed commit
+func executeDupCursorOperationsWithCommit(chaindb kv.RwDB, keepRecentBatches uint64, fastDupCursorMode, safeFastMode bool, ctx context.Context) {
+	fmt.Printf("\n=== Phase 1b: DupCursor Data Cleanup ===\n")
+
+	tx, err := chaindb.BeginRw(ctx)
+	if err != nil {
+		logv3.Error("Failed to start transaction for dupCursor cleanup", "error", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		fmt.Printf("Committing Phase 1b (dupCursor operations)...\n")
+		if err := tx.Commit(); err != nil {
+			logv3.Error("Failed to commit dupCursor operations", "error", err)
+			tx.Rollback()
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Phase 1b committed successfully\n")
+	}()
+
+	fmt.Printf("Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet\n")
+	fmt.Printf("Note: CanonicalHeader and hermez_blockBatches are preserved for node stability\n")
+
+	if fastDupCursorMode {
+		fmt.Printf("⚡ Fast dupCursor mode enabled: using direct cursor deletion for maximum performance\n")
+	} else if safeFastMode {
+		fmt.Printf("🛡️⚡ Safe-Fast dupCursor mode enabled: balanced performance and safety\n")
+	} else {
+		fmt.Printf("🔄 Standard dupCursor mode: using optimized batch processing for safety\n")
+	}
+
+	deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches, fastDupCursorMode, safeFastMode)
+	if err != nil {
+		logv3.Error("Failed to perform dupCursor data cleanup", "error", err)
+	} else {
+		fmt.Printf("✓ Historical dupCursor data cleanup completed: %d records deleted\n", deletedDupCursorRecords)
+	}
+}
+
+// executeTableDeletionsWithCommit executes table deletion operations with guaranteed commit
+func executeTableDeletionsWithCommit(
+	chaindb kv.RwDB,
+	sortedTables []tableSizeInfo,
+	preCollectedStats map[string]struct {
+	entries   uint64
+	sizeBytes uint64
+	pages     uint64
+},
+	partiallyPrunedTables map[string]bool,
+	pruneLevel PruneLevel,
+	log logv3.Logger,
+	ctx context.Context,
+) (int, int, uint64) {
+	if len(sortedTables) == 0 {
+		fmt.Printf("\n=== Phase 2: No tables to delete ===\n")
+		return 0, 0, 0
+	}
+
+	fmt.Printf("\n=== Phase 2: Table Deletions ===\n")
+
+	tx, err := chaindb.BeginRw(ctx)
+	if err != nil {
+		logv3.Error("Failed to start transaction for table deletions", "error", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		fmt.Printf("Committing Phase 2 (table deletions)...\n")
+		if err := tx.Commit(); err != nil {
+			logv3.Error("Failed to commit table deletions", "error", err)
+			tx.Rollback()
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Phase 2 committed successfully\n")
+	}()
+
+	deletedCount, actuallyDeletedTables, actualDeletedSize := executeOptimizedTableDeletion(
+		tx, chaindb, sortedTables, preCollectedStats, partiallyPrunedTables, pruneLevel, logv3.New())
+
+	if deletedCount < 0 {
+		deletedCount = 0
+	}
+
+	return deletedCount, actuallyDeletedTables, actualDeletedSize
 }
