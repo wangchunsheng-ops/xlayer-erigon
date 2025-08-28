@@ -29,7 +29,23 @@ func NewPendingStateCache(globalCache *GlobalStateCache, size int) *PendingState
 	}
 }
 
-func (cache *PendingStateCache) ApplyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
+func (cache *PendingStateCache) ApplyTxChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
+	log.Debug(fmt.Sprintf("[Realtime] Applying tx changeset with height: %d, tx index: %d", blockNumber, txIndex))
+	return cache.applyChangeset(changeset, blockNumber, txIndex)
+}
+
+func (cache *PendingStateCache) ApplyStartBlockChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64) error {
+	log.Debug(fmt.Sprintf("[Realtime] Applying start block changeset with height: %d", blockNumber))
+	return cache.applyChangeset(changeset, blockNumber, 0)
+}
+
+func (cache *PendingStateCache) ApplyCloseBlockChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64) error {
+	log.Debug(fmt.Sprintf("[Realtime] Applying close block changeset with height: %d", blockNumber))
+	return cache.applyChangeset(changeset, blockNumber, 0)
+}
+
+// applyChangeset applies the given changeset to the cache (core logic)
+func (cache *PendingStateCache) applyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, index uint) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
@@ -72,8 +88,6 @@ func (cache *PendingStateCache) ApplyChangeset(changeset *realtimeTypes.Changese
 		cache.cache.accountCache[address] = account
 		log.Debug(fmt.Sprintf("[Realtime] ApplyChangeset: %s", address))
 	}
-
-	log.Debug(fmt.Sprintf("[Realtime] Apply changeset from tx with height: %d, txIndex: %d\n", blockNumber, txIndex))
 
 	return nil
 }

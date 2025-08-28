@@ -21,14 +21,14 @@ func NewBlockInfoMap(size int) *BlockInfoMap {
 	}
 }
 
-func (bm *BlockInfoMap) Get(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, bool) {
+func (bm *BlockInfoMap) Get(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, *Changeset, *Changeset, bool) {
 	bm.mu.RLock()
 	defer bm.mu.RUnlock()
 	blockInfo, exists := bm.blockInfos[blockNum]
 	if exists {
-		return blockInfo.Header, blockInfo.TxCount, blockInfo.Hash, true
+		return blockInfo.Header, blockInfo.TxCount, blockInfo.Hash, blockInfo.StartBlockChangeset, blockInfo.CloseBlockChangeset, true
 	}
-	return nil, 0, libcommon.Hash{}, exists
+	return nil, 0, libcommon.Hash{}, nil, nil, exists
 }
 
 func (bm *BlockInfoMap) GetBlockNumberByHash(blockHash libcommon.Hash) (uint64, bool) {
@@ -45,15 +45,18 @@ func (bm *BlockInfoMap) PutNewHeader(blockNum uint64, blockInfo *BlockInfo) {
 	bm.blockInfos[blockNum] = blockInfo
 }
 
-func (bm *BlockInfoMap) PutConfirmedHeader(blockNum uint64, blockInfo *BlockInfo) {
+func (bm *BlockInfoMap) PutConfirmedBlockInfo(blockNum uint64, blockInfo *BlockInfo) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
+	if existingBlockInfo, exists := bm.blockInfos[blockNum]; exists && existingBlockInfo.StartBlockChangeset != nil {
+		blockInfo.StartBlockChangeset = existingBlockInfo.StartBlockChangeset
+	}
 	bm.blockInfos[blockNum] = blockInfo
 	bm.blockHashToHeight[blockInfo.Hash] = blockNum
 }
 
 func (bm *BlockInfoMap) Delete(blockNum uint64) {
-	_, _, blockhash, exists := bm.Get(blockNum)
+	_, _, blockhash, _, _, exists := bm.Get(blockNum)
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	if exists {

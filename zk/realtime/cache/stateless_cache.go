@@ -29,14 +29,14 @@ func (cache *StatelessCache) Clear() {
 }
 
 // -------------- Read operations --------------
-func (cache *StatelessCache) GetHeader(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, bool) {
+func (cache *StatelessCache) GetBlockInfo(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, *realtimeTypes.Changeset, *realtimeTypes.Changeset, bool) {
 	return cache.blockInfoMap.Get(blockNum)
 }
 
-func (cache *StatelessCache) GetHeaderByHash(blockHash libcommon.Hash) (*ethTypes.Header, int64, libcommon.Hash, bool) {
+func (cache *StatelessCache) GetBlockInfoByHash(blockHash libcommon.Hash) (*ethTypes.Header, int64, libcommon.Hash, *realtimeTypes.Changeset, *realtimeTypes.Changeset, bool) {
 	blockNum, exists := cache.blockInfoMap.GetBlockNumberByHash(blockHash)
 	if !exists {
-		return nil, 0, libcommon.Hash{}, false
+		return nil, 0, libcommon.Hash{}, nil, nil, false
 	}
 	return cache.blockInfoMap.Get(blockNum)
 }
@@ -58,8 +58,8 @@ func (cache *StatelessCache) PutNewHeader(blockNum uint64, blockInfo *realtimeTy
 	cache.blockInfoMap.PutNewHeader(blockNum, blockInfo)
 }
 
-func (cache *StatelessCache) PutConfirmedHeader(blockNum uint64, blockInfo *realtimeTypes.BlockInfo) {
-	cache.blockInfoMap.PutConfirmedHeader(blockNum, blockInfo)
+func (cache *StatelessCache) PutConfirmedBlockInfo(blockNum uint64, blockInfo *realtimeTypes.BlockInfo) {
+	cache.blockInfoMap.PutConfirmedBlockInfo(blockNum, blockInfo)
 }
 
 func (cache *StatelessCache) PutTxInfo(blockNum uint64, txHash libcommon.Hash, tx ethTypes.Transaction, receipt *ethTypes.Receipt, innerTxs []*zktypes.InnerTx) {
@@ -73,7 +73,7 @@ func (cache *StatelessCache) DeleteBlock(blockNum uint64) {
 
 // -------------- For HeaderReader --------------
 func (cache *StatelessCache) Header(ctx context.Context, tx kv.Getter, hash libcommon.Hash, blockNum uint64) (*ethTypes.Header, error) {
-	header, _, _, ok := cache.GetHeader(blockNum)
+	header, _, _, _, _, ok := cache.GetBlockInfo(blockNum)
 	if !ok {
 		return nil, fmt.Errorf("header not found for block number %d", blockNum)
 	}
@@ -81,7 +81,7 @@ func (cache *StatelessCache) Header(ctx context.Context, tx kv.Getter, hash libc
 }
 
 func (cache *StatelessCache) HeaderByNumber(ctx context.Context, tx kv.Getter, blockNum uint64) (*ethTypes.Header, error) {
-	header, _, _, ok := cache.GetHeader(blockNum)
+	header, _, _, _, _, ok := cache.GetBlockInfo(blockNum)
 	if !ok {
 		return nil, fmt.Errorf("header not found for block number %d", blockNum)
 	}
@@ -89,7 +89,7 @@ func (cache *StatelessCache) HeaderByNumber(ctx context.Context, tx kv.Getter, b
 }
 
 func (cache *StatelessCache) HeaderByHash(ctx context.Context, tx kv.Getter, hash libcommon.Hash) (*ethTypes.Header, error) {
-	header, _, _, ok := cache.GetHeaderByHash(hash)
+	header, _, _, _, _, ok := cache.GetBlockInfoByHash(hash)
 	if !ok {
 		return nil, fmt.Errorf("header not found for block hash %s", hash.Hex())
 	}

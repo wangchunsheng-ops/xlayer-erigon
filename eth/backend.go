@@ -260,8 +260,8 @@ type Ethereum struct {
 	kafkaProducer          *realtimeKafka.KafkaProducer
 	kafkaConsumer          *realtimeKafka.KafkaConsumer
 	realtimeCache          *realtimeCache.RealtimeCache
-	newBlockInfoChan       chan *types.Header
-	confirmedBlockInfoChan chan *types.Block
+	newBlockInfoChan       chan *realtimeTypes.HeaderWithChangeset
+	confirmedBlockInfoChan chan *realtimeTypes.BlockWithChangeset
 	txInfoChan             chan state.TxInfo
 	finishChan             chan realtimeTypes.FinishedEntry
 	realtimeSub            *realtimeSub.RealtimeSubscription
@@ -1244,8 +1244,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				} else {
 					backend.kafkaEnabled = true
 					backend.kafkaProducer = kafkaProducer
-					backend.newBlockInfoChan = make(chan *types.Header, realtimeKafka.DefaultKafkaBufferSize)
-					backend.confirmedBlockInfoChan = make(chan *types.Block, realtimeKafka.DefaultKafkaBufferSize)
+					backend.newBlockInfoChan = make(chan *realtimeTypes.HeaderWithChangeset, realtimeKafka.DefaultKafkaBufferSize)
+					backend.confirmedBlockInfoChan = make(chan *realtimeTypes.BlockWithChangeset, realtimeKafka.DefaultKafkaBufferSize)
 					backend.txInfoChan = make(chan state.TxInfo, realtimeKafka.DefaultKafkaBufferSize)
 
 					// Send error trigger message on sequencer restart

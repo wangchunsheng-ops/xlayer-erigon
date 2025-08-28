@@ -8,9 +8,11 @@ import (
 )
 
 type BlockInfo struct {
-	Header  *types.Header  `json:"header"`
-	TxCount int64          `json:"txCount"`
-	Hash    libcommon.Hash `json:"hash"`
+	Header              *types.Header  `json:"header"`
+	TxCount             int64          `json:"txCount"`
+	Hash                libcommon.Hash `json:"hash"`
+	StartBlockChangeset *Changeset     `json:"startBlockChangeset,omitempty"`
+	CloseBlockChangeset *Changeset     `json:"closeBlockChangeset,omitempty"`
 }
 
 func (msg BlockInfo) Validate(executionHeight uint64) error {
@@ -30,4 +32,16 @@ func (msg BlockInfo) Validate(executionHeight uint64) error {
 
 func (msg BlockInfo) IsConfirmedBlock() bool {
 	return msg.TxCount >= 0 && msg.Hash != (libcommon.Hash{})
+}
+
+// HeaderWithChangeset combines a header with its changeset for confirmed block messages
+type HeaderWithChangeset struct {
+	Header    *types.Header
+	Changeset *Changeset
+}
+
+// BlockWithChangeset combines a block with its changeset for confirmed block messages
+type BlockWithChangeset struct {
+	Block     *types.Block
+	Changeset *Changeset
 }

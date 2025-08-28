@@ -157,7 +157,7 @@ func (api *RealtimeAPIImpl) tryGetBlockResponseFromNumber(
 	blockNum uint64,
 	fullTx bool,
 ) (map[string]interface{}, error) {
-	header, _, _, ok := api.cacheDB.Stateless.GetHeader(blockNum)
+	header, _, _, _, _, ok := api.cacheDB.Stateless.GetBlockInfo(blockNum)
 	if !ok {
 		return nil, fmt.Errorf("header not found for block %d", blockNum)
 	}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ledgerwatch/erigon/core/state"
-	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/zk/realtime/cache"
 	"github.com/ledgerwatch/erigon/zk/realtime/kafka"
 	kafkaTypes "github.com/ledgerwatch/erigon/zk/realtime/kafka/types"
@@ -30,8 +29,8 @@ var (
 func ListenKafkaProducer(
 	ctx context.Context,
 	kafkaProducer *kafka.KafkaProducer,
-	newBlockInfoChan chan *types.Header,
-	confirmedBlockInfoChan chan *types.Block,
+	newBlockInfoChan chan *realtimeTypes.HeaderWithChangeset,
+	confirmedBlockInfoChan chan *realtimeTypes.BlockWithChangeset,
 	txInfoChan chan state.TxInfo) {
 	if !sequencer.IsSequencer() {
 		log.Info("[Realtime] KafkaProducer is disabled on non-sequencer, skipping")
@@ -44,9 +43,9 @@ func ListenKafkaProducer(
 		select {
 		case <-ctx.Done():
 			return
-		case header := <-newBlockInfoChan:
-			currHeight = header.Number.Uint64()
-			err := kafkaProducer.SendKafkaNewBlockInfo(header)
+		case headerWithChangeset := <-newBlockInfoChan:
+			currHeight = headerWithChangeset.Header.Number.Uint64()
+			err := kafkaProducer.SendKafkaNewBlockInfo(headerWithChangeset)
 			if err != nil {
 				log.Error(fmt.Sprintf("[Realtime] Failed to send kafka new block info message. error: %v, currHeight: %d", err, currHeight))
 				err = kafkaProducer.SendKafkaErrorTrigger(currHeight)
@@ -56,9 +55,9 @@ func ListenKafkaProducer(
 			} else {
 				log.Debug(fmt.Sprintf("[Realtime] Sent kafka new block info message for block number %d", currHeight))
 			}
-		case block := <-confirmedBlockInfoChan:
-			currHeight = block.NumberU64()
-			err := kafkaProducer.SendKafkaConfirmedBlockInfo(block)
+		case blockWithChangeset := <-confirmedBlockInfoChan:
+			currHeight = blockWithChangeset.Block.NumberU64()
+			err := kafkaProducer.SendKafkaConfirmedBlockInfo(blockWithChangeset)
 			if err != nil {
 				log.Error(fmt.Sprintf("[Realtime] Failed to send kafka confirmed block info message. error: %v, currHeight: %d", err, currHeight))
 				err = kafkaProducer.SendKafkaErrorTrigger(currHeight)

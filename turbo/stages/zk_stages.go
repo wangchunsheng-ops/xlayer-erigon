@@ -9,7 +9,6 @@ import (
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/core/rawdb/blockio"
 	state2 "github.com/ledgerwatch/erigon/core/state"
-	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
@@ -130,8 +129,8 @@ func NewSequencerZkStages(ctx context.Context,
 	txPoolDb kv.RwDB,
 	infoTreeUpdater *l1infotree.Updater,
 	hook *Hook,
-	kafkaNewBlockInfoChan chan *types.Header,
-	kafkaConfirmedBlockInfoChan chan *types.Block,
+	kafkaNewBlockInfoChan chan *realtimeTypes.HeaderWithChangeset,
+	kafkaConfirmedBlockInfoChan chan *realtimeTypes.BlockWithChangeset,
 	kafkaTxInfoChan chan state2.TxInfo,
 ) []*stagedsync.Stage {
 	dirs := cfg.Dirs

@@ -66,23 +66,25 @@ func (client *KafkaProducer) SendKafkaTransaction(blockNumber uint64, tx types.T
 	return nil
 }
 
-func (client *KafkaProducer) SendKafkaNewBlockInfo(header *types.Header) error {
+func (client *KafkaProducer) SendKafkaNewBlockInfo(headerWithChangeset *realtimeTypes.HeaderWithChangeset) error {
 	msg := &realtimeTypes.BlockInfo{
-		Header:  header,
-		TxCount: -1,
-		Hash:    libcommon.Hash{},
+		Header:              headerWithChangeset.Header,
+		TxCount:             -1,
+		Hash:                libcommon.Hash{},
+		StartBlockChangeset: headerWithChangeset.Changeset,
 	}
 
 	return client.SendKafkaBlockMessage(msg)
 }
 
-func (client *KafkaProducer) SendKafkaConfirmedBlockInfo(block *types.Block) error {
+func (client *KafkaProducer) SendKafkaConfirmedBlockInfo(blockWithChangeset *realtimeTypes.BlockWithChangeset) error {
 	// Get transaction count for the block
-	blockTxCount := int64(len(block.Transactions()))
+	blockTxCount := int64(len(blockWithChangeset.Block.Transactions()))
 	msg := &realtimeTypes.BlockInfo{
-		Header:  block.Header(),
-		TxCount: blockTxCount,
-		Hash:    block.Hash(),
+		Header:              blockWithChangeset.Block.Header(),
+		TxCount:             blockTxCount,
+		Hash:                blockWithChangeset.Block.Hash(),
+		CloseBlockChangeset: blockWithChangeset.Changeset,
 	}
 
 	return client.SendKafkaBlockMessage(msg)

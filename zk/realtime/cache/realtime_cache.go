@@ -199,11 +199,14 @@ func (cache *RealtimeCache) TryCloseBlockFromConfirmedBlockMsg(blockNum uint64, 
 	}
 
 	// Update stateless cache
-	cache.Stateless.PutConfirmedHeader(blockNum, blockMsg)
+	cache.Stateless.PutConfirmedBlockInfo(blockNum, blockMsg)
 
 	// Update pending block context
 	pendingContext.txCount = blockMsg.TxCount
-	cache.tryCloseBlock(pendingContext)
+	err := cache.tryCloseBlock(pendingContext)
+	if err != nil {
+		return false, fmt.Errorf("failed to close block. Block number: %d, error: %v", blockNum, err)
+	}
 
 	return true, nil
 }
@@ -226,6 +229,17 @@ func (cache *RealtimeCache) HandlePendingBlocks(kafkaCache *KafkaCache) error {
 }
 
 func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContext, sortedTxMsgs []*kafkaTypes.TransactionMessage) error {
+	// Apply start block changeset
+	if blockContext.nextTxIndex == 0 {
+		_, _, _, startBlockChangeset, _, ok := cache.Stateless.GetBlockInfo(blockContext.blockNum)
+		if ok && startBlockChangeset != nil {
+			err := blockContext.pendingStateCache.ApplyStartBlockChangeset(startBlockChangeset, blockContext.blockNum)
+			if err != nil {
+				return fmt.Errorf("failed to apply start block changeset. Block number: %d, error: %v", blockContext.blockNum, err)
+			}
+		}
+	}
+
 	// Add to pending queue
 	for _, txMsg := range sortedTxMsgs {
 		blockContext.pendingTxs.Add(txMsg)
@@ -258,7 +272,7 @@ func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContex
 			return fmt.Errorf("failed to get inner txs. Block number: %d, tx index: %d, error: %v", txMsg.BlockNumber, blockContext.nextTxIndex, err)
 		}
 		cache.Stateless.PutTxInfo(blockContext.blockNum, txMsg.Hash, tx, receipt, innerTxs)
-		blockContext.pendingStateCache.ApplyChangeset(txMsg.Changeset, txMsg.BlockNumber, txMsg.Receipt.TransactionIndex)
+		blockContext.pendingStateCache.ApplyTxChangeset(txMsg.Changeset, txMsg.BlockNumber, txMsg.Receipt.TransactionIndex)
 		blockContext.nextTxIndex++
 		processed++
 	}
@@ -268,7 +282,10 @@ func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContex
 	blockContext.pendingTxs.Sort()
 
 	// Try to close block
-	cache.tryCloseBlock(blockContext)
+	err := cache.tryCloseBlock(blockContext)
+	if err != nil {
+		return fmt.Errorf("failed to close block. Block number: %d, error: %v", blockContext.blockNum, err)
+	}
 
 	return nil
 }
@@ -307,25 +324,34 @@ func (cache *RealtimeCache) tryCreateNewPendingBlockContext(blockNum uint64) err
 	return nil
 }
 
-func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockContext) {
+func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockContext) error {
 	if pendingBlockContext == nil {
-		return
+		return nil
 	}
 
 	if pendingBlockContext.txCount < 0 {
-		// Header not received yet. Skip close
-		return
+		// txCount not updated yet. Skip close
+		return nil
 	}
 
 	if pendingBlockContext.pendingTxs.Size() > 0 || pendingBlockContext.txCount != int64(pendingBlockContext.nextTxIndex) {
 		// Cannot close block yet, missing txs
-		return
+		return nil
 	}
 
 	nextHeight := cache.GetHighestConfirmHeight() + 1
 	if pendingBlockContext.blockNum != nextHeight {
 		// Block must be closed in order
-		return
+		return nil
+	}
+
+	// Apply close block changeset
+	_, _, _, _, closeBlockChangeset, ok := cache.Stateless.GetBlockInfo(pendingBlockContext.blockNum)
+	if ok && closeBlockChangeset != nil {
+		if err := pendingBlockContext.pendingStateCache.ApplyCloseBlockChangeset(closeBlockChangeset, pendingBlockContext.blockNum); err != nil {
+			log.Error(fmt.Sprintf("[Realtime] Failed to apply closeBlock changeset. Block number: %d, error: %v", pendingBlockContext.blockNum, err))
+			return err
+		}
 	}
 
 	// Close block
@@ -342,6 +368,7 @@ func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockConte
 	cache.PutHighestConfirmHeight(pendingBlockContext.blockNum)
 	cache.State.FlushState(pendingBlockContext.pendingStateCache.cache)
 	log.Info(fmt.Sprintf("[Realtime] Closed block %d, pending blocks queue size: %d", pendingBlockContext.blockNum, cache.pendingBlocks.Size()))
+	return nil
 }
 
 // -------------- Debug operations --------------

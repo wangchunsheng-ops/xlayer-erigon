@@ -20,6 +20,7 @@ import (
 	"github.com/ledgerwatch/erigon/zk/datastream/server"
 	"github.com/ledgerwatch/erigon/zk/hermez_db"
 	"github.com/ledgerwatch/erigon/zk/metrics"
+	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
 	zktx "github.com/ledgerwatch/erigon/zk/tx"
 	"github.com/ledgerwatch/erigon/zk/txpool"
 	"github.com/ledgerwatch/erigon/zk/utils"
@@ -443,6 +444,7 @@ BatchLoop:
 		if err = handleStateForNewBlockStarting(batchContext, ibs, blockNumber, batchState.batchNumber, header.Time, &parentRoot, l1TreeUpdate, shouldWriteGerToContract); err != nil {
 			return err
 		}
+		preExecuteChangeset := ibs.GenerateChangeset()
 
 		// start waiting for a new transaction to arrive
 		if !batchState.isAnyRecovery() {
@@ -460,7 +462,10 @@ BatchLoop:
 
 		// For X Layer, realtime. Send kafka block header
 		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaNewBlockInfoChan != nil {
-			cfg.kafkaNewBlockInfoChan <- header
+			cfg.kafkaNewBlockInfoChan <- &realtimeTypes.HeaderWithChangeset{
+				Header:    header,
+				Changeset: preExecuteChangeset,
+			}
 		}
 
 	OuterLoopTransactions:
@@ -766,11 +771,12 @@ BatchLoop:
 		}
 
 		// For X Layer, split db and ac
+		var postExecuteChangeset *realtimeTypes.Changeset
 		if batchContext.sdb.supportAC {
 			quit := batchContext.ctx.Done()
 			batchContext.sdb.eridb.OpenBatch(quit)           // do nothing...
 			batchContext.sdb.eridb.SetCache(s.GetSmtCache()) // will deep copy in internal function
-			if block, err = doFinishBlockAndUpdateState(batchContext, ibs, header, parentBlock, batchState, ger, l1BlockHash, l1TreeUpdateIndex, infoTreeIndexProgress); err != nil {
+			if block, postExecuteChangeset, err = doFinishBlockAndUpdateState(batchContext, ibs, header, parentBlock, batchState, ger, l1BlockHash, l1TreeUpdateIndex, infoTreeIndexProgress); err != nil {
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
@@ -786,7 +792,7 @@ BatchLoop:
 		} else {
 			quit := batchContext.ctx.Done()
 			batchContext.sdb.eridb.OpenBatch(quit)
-			if block, err = doFinishBlockAndUpdateState(batchContext, ibs, header, parentBlock, batchState, ger, l1BlockHash, l1TreeUpdateIndex, infoTreeIndexProgress); err != nil {
+			if block, postExecuteChangeset, err = doFinishBlockAndUpdateState(batchContext, ibs, header, parentBlock, batchState, ger, l1BlockHash, l1TreeUpdateIndex, infoTreeIndexProgress); err != nil {
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
@@ -883,7 +889,10 @@ BatchLoop:
 		}
 		// For X Layer, realtime
 		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaConfirmedBlockInfoChan != nil {
-			cfg.kafkaConfirmedBlockInfoChan <- block
+			cfg.kafkaConfirmedBlockInfoChan <- &realtimeTypes.BlockWithChangeset{
+				Block:     block,
+				Changeset: postExecuteChangeset,
+			}
 		}
 
 		// lets commit everything after updateStreamAndCheckRollback no matter of its result unless
