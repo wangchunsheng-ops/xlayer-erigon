@@ -40,11 +40,27 @@ func executeStagedTableDeletion(
 		return 0, 0, 0
 	}
 
-	// Classify tables: small tables and large tables
-	var smallTables, largeTables []tableSizeInfo
+	// Classify tables: small tables, large NoSync tables, and large regular tables
+	var smallTables, largeNoSyncTables, largeRegularTables []tableSizeInfo
+
+	// NoSync tables that need special handling
+	noSyncTables := map[string]bool{
+		"hermez_txPricePercentage":          true,
+		"hermez_intermediate_tx_stateRoots": true,
+		"hermez_blockBatches":               true,
+		"hermez_globalExitRoots":            true,
+		"hermez_stateRoots":                 true,
+		"hermez_batch_witnesses":            true,
+		"hermez_batch_counters":             true,
+	}
+
 	for _, table := range sortedTables {
 		if table.size >= LARGE_TABLE_THRESHOLD {
-			largeTables = append(largeTables, table)
+			if noSyncTables[table.name] {
+				largeNoSyncTables = append(largeNoSyncTables, table)
+			} else {
+				largeRegularTables = append(largeRegularTables, table)
+			}
 		} else {
 			smallTables = append(smallTables, table)
 		}
@@ -52,7 +68,8 @@ func executeStagedTableDeletion(
 
 	fmt.Printf("\n=== Staged Deletion Strategy ===\n")
 	fmt.Printf("Small tables (<%s): %d tables\n", datasize.ByteSize(LARGE_TABLE_THRESHOLD).HumanReadable(), len(smallTables))
-	fmt.Printf("Large tables (>=%s): %d tables\n", datasize.ByteSize(LARGE_TABLE_THRESHOLD).HumanReadable(), len(largeTables))
+	fmt.Printf("Large NoSync tables (>=%s): %d tables\n", datasize.ByteSize(LARGE_TABLE_THRESHOLD).HumanReadable(), len(largeNoSyncTables))
+	fmt.Printf("Large regular tables (>=%s): %d tables\n", datasize.ByteSize(LARGE_TABLE_THRESHOLD).HumanReadable(), len(largeRegularTables))
 
 	var totalDeletedCount, totalActuallyDeletedTables int
 	var totalActualDeletedSize uint64
@@ -67,10 +84,20 @@ func executeStagedTableDeletion(
 		totalActualDeletedSize += actualDeletedSize
 	}
 
-	// === Stage 2: Delete large tables individually ===
-	if len(largeTables) > 0 {
-		deletedCount, actuallyDeletedTables, actualDeletedSize := executeLargeTablesDeletionIndividually(
-			dbPath, largeTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log, ctx)
+	// === Stage 2: Delete large NoSync tables individually ===
+	if len(largeNoSyncTables) > 0 {
+		deletedCount, actuallyDeletedTables, actualDeletedSize := executeLargeNoSyncTablesDeletion(
+			dbPath, largeNoSyncTables, preCollectedStats, log, ctx)
+
+		totalDeletedCount += deletedCount
+		totalActuallyDeletedTables += actuallyDeletedTables
+		totalActualDeletedSize += actualDeletedSize
+	}
+
+	// === Stage 3: Delete large regular tables individually ===
+	if len(largeRegularTables) > 0 {
+		deletedCount, actuallyDeletedTables, actualDeletedSize := executeLargeRegularTablesDeletion(
+			dbPath, largeRegularTables, preCollectedStats, log, ctx)
 
 		totalDeletedCount += deletedCount
 		totalActuallyDeletedTables += actuallyDeletedTables
@@ -134,9 +161,9 @@ func executeSmallTableDeletion(
 		}
 	}()
 
-	// Execute small table deletion
-	deletedCount, actuallyDeletedTables, actualDeletedSize := executeOptimizedTableDeletion(
-		tx, chaindb, smallTables, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
+	// Execute ONLY small table deletion (avoid mixing with large table logic)
+	deletedCount, actuallyDeletedTables, actualDeletedSize := executeSimpleTableDeletion(
+		tx, smallTables, preCollectedStats)
 
 	// Commit transaction
 	fmt.Printf("Committing Stage 1 transaction...\n")
@@ -152,59 +179,6 @@ func executeSmallTableDeletion(
 	return deletedCount, actuallyDeletedTables, actualDeletedSize
 }
 
-// executeLargeTablesDeletionIndividually executes large table deletion individually (Stage 2)
-// Each large table is processed in its own transaction to avoid large transaction timeout
-func executeLargeTablesDeletionIndividually(
-	dbPath string,
-	largeTables []tableSizeInfo,
-	preCollectedStats map[string]struct {
-		entries   uint64
-		sizeBytes uint64
-		pages     uint64
-	},
-	partiallyPrunedTables map[string]bool,
-	pruneLevel PruneLevel,
-	log logv3.Logger,
-	ctx context.Context,
-) (int, int, uint64) {
-
-	fmt.Printf("\n=== Stage 2: Large Table Deletion (%d tables, processed individually) ===\n", len(largeTables))
-
-	// Brief wait to ensure Stage 1 resources are fully released
-	fmt.Printf("Waiting for database resources to be released...\n")
-	time.Sleep(3 * time.Second)
-
-	var totalDeletedCount, totalActuallyDeletedTables int
-	var totalActualDeletedSize uint64
-
-	// Process each large table individually
-	for i, largeTable := range largeTables {
-		fmt.Printf("\n--- Processing large table %d/%d: %s (%s) ---\n",
-			i+1, len(largeTables), largeTable.name, datasize.ByteSize(largeTable.size).HumanReadable())
-
-		deletedCount, actuallyDeletedTables, actualDeletedSize := executeSingleLargeTableDeletion(
-			dbPath, largeTable, preCollectedStats, partiallyPrunedTables, pruneLevel, log, ctx)
-
-		totalDeletedCount += deletedCount
-		totalActuallyDeletedTables += actuallyDeletedTables
-		totalActualDeletedSize += actualDeletedSize
-
-		fmt.Printf("✓ Large table %s processed: freed %s\n",
-			largeTable.name, datasize.ByteSize(actualDeletedSize).HumanReadable())
-
-		// Brief pause between large tables to let MDBX clean up
-		if i < len(largeTables)-1 {
-			fmt.Printf("Pausing between large tables...\n")
-			time.Sleep(2 * time.Second)
-		}
-	}
-
-	fmt.Printf("\n✓ Stage 2 completed: deleted %d large tables, freed %s total\n",
-		totalActuallyDeletedTables, datasize.ByteSize(totalActualDeletedSize).HumanReadable())
-
-	return totalDeletedCount, totalActuallyDeletedTables, totalActualDeletedSize
-}
-
 // executeSingleLargeTableDeletion processes a single large table in its own transaction
 func executeSingleLargeTableDeletion(
 	dbPath string,
@@ -214,8 +188,6 @@ func executeSingleLargeTableDeletion(
 		sizeBytes uint64
 		pages     uint64
 	},
-	partiallyPrunedTables map[string]bool,
-	pruneLevel PruneLevel,
 	log logv3.Logger,
 	ctx context.Context,
 ) (int, int, uint64) {
@@ -250,10 +222,9 @@ func executeSingleLargeTableDeletion(
 		}
 	}()
 
-	// Process only this single table
-	singleTableSlice := []tableSizeInfo{largeTable}
-	deletedCount, actuallyDeletedTables, actualDeletedSize := executeOptimizedTableDeletion(
-		tx, chaindb, singleTableSlice, preCollectedStats, partiallyPrunedTables, pruneLevel, log)
+	// Process only this single large table with simple deletion
+	deletedCount, actuallyDeletedTables, actualDeletedSize := executeSingleTableSimpleDeletion(
+		tx, largeTable, preCollectedStats)
 
 	// Commit transaction for this table
 	fmt.Printf("Committing transaction for %s...\n", largeTable.name)
@@ -293,4 +264,237 @@ func openDatabaseWithRetry(dbPath string, label kv.Label, log logv3.Logger, maxR
 	}
 
 	return nil, fmt.Errorf("failed to open database after %d retries", maxRetries)
+}
+
+// executeSimpleTableDeletion performs simple table deletion without complex optimization
+func executeSimpleTableDeletion(tx kv.RwTx, tables []tableSizeInfo, preCollectedStats map[string]struct {
+	entries   uint64
+	sizeBytes uint64
+	pages     uint64
+}) (int, int, uint64) {
+
+	var actualDeletedSize uint64
+	actuallyDeletedTables := 0
+
+	fmt.Printf("🗑️ Deleting %d small tables with simple strategy...\n", len(tables))
+
+	for i, table := range tables {
+		fmt.Printf("Clearing table (%d/%d): %s\n", i+1, len(tables), table.name)
+
+		// Simple ClearBucket deletion
+		err := tx.ClearBucket(table.name)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to clear table %s: %v\n", table.name, err)
+			continue
+		}
+
+		// Track actual deleted size
+		if stats, exists := preCollectedStats[table.name]; exists {
+			actualDeletedSize += stats.sizeBytes
+			fmt.Printf("✓ Cleared table: %s (%s, %d entries)\n",
+				table.name,
+				datasize.ByteSize(stats.sizeBytes).HumanReadable(),
+				stats.entries)
+		} else {
+			fmt.Printf("✓ Cleared table: %s (size unknown)\n", table.name)
+		}
+
+		actuallyDeletedTables++
+	}
+
+	return len(tables), actuallyDeletedTables, actualDeletedSize
+}
+
+// executeSingleTableSimpleDeletion performs simple deletion for a single large table
+func executeSingleTableSimpleDeletion(tx kv.RwTx, table tableSizeInfo, preCollectedStats map[string]struct {
+	entries   uint64
+	sizeBytes uint64
+	pages     uint64
+}) (int, int, uint64) {
+
+	fmt.Printf("🗑️ Deleting large table: %s (%s)\n",
+		table.name,
+		datasize.ByteSize(table.size).HumanReadable())
+
+	// Simple ClearBucket deletion for large table
+	err := tx.ClearBucket(table.name)
+	if err != nil {
+		fmt.Printf("⚠️ Failed to clear large table %s: %v\n", table.name, err)
+		return 0, 0, 0
+	}
+
+	// Track actual deleted size
+	var actualDeletedSize uint64
+	if stats, exists := preCollectedStats[table.name]; exists {
+		actualDeletedSize = stats.sizeBytes
+		fmt.Printf("✓ Cleared large table: %s (%s, %d entries)\n",
+			table.name,
+			datasize.ByteSize(stats.sizeBytes).HumanReadable(),
+			stats.entries)
+	} else {
+		actualDeletedSize = table.size // Use table.size as fallback
+		fmt.Printf("✓ Cleared large table: %s (%s)\n",
+			table.name,
+			datasize.ByteSize(table.size).HumanReadable())
+	}
+
+	return 1, 1, actualDeletedSize
+}
+
+// executeLargeNoSyncTablesDeletion processes large NoSync tables with proper NoSync transactions
+func executeLargeNoSyncTablesDeletion(
+	dbPath string,
+	largeNoSyncTables []tableSizeInfo,
+	preCollectedStats map[string]struct {
+		entries   uint64
+		sizeBytes uint64
+		pages     uint64
+	},
+	log logv3.Logger,
+	ctx context.Context,
+) (int, int, uint64) {
+
+	if len(largeNoSyncTables) == 0 {
+		return 0, 0, 0
+	}
+
+	fmt.Printf("\n=== Stage 2: Large NoSync Table Deletion (%d tables) ===\n", len(largeNoSyncTables))
+
+	var totalDeleted, totalActuallyDeleted int
+	var totalDeletedSize uint64
+
+	for i, table := range largeNoSyncTables {
+		fmt.Printf("\n🔄 Processing large NoSync table (%d/%d): %s (%s)...\n",
+			i+1, len(largeNoSyncTables), table.name, datasize.ByteSize(table.size).HumanReadable())
+
+		deleted, actualDeleted, deletedSize := executeSingleNoSyncTableDeletion(dbPath, table, preCollectedStats, log, ctx)
+
+		totalDeleted += deleted
+		totalActuallyDeleted += actualDeleted
+		totalDeletedSize += deletedSize
+
+		// Small pause between tables to let MDBX cleanup
+		if i < len(largeNoSyncTables)-1 {
+			fmt.Printf("⏸️ Pausing 3 seconds before next NoSync table...\n")
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	fmt.Printf("✓ Stage 2 completed: deleted %d NoSync tables, freed %s\n",
+		totalActuallyDeleted, datasize.ByteSize(totalDeletedSize).HumanReadable())
+
+	return totalDeleted, totalActuallyDeleted, totalDeletedSize
+}
+
+// executeLargeRegularTablesDeletion processes large regular tables with normal transactions
+func executeLargeRegularTablesDeletion(
+	dbPath string,
+	largeRegularTables []tableSizeInfo,
+	preCollectedStats map[string]struct {
+		entries   uint64
+		sizeBytes uint64
+		pages     uint64
+	},
+	log logv3.Logger,
+	ctx context.Context,
+) (int, int, uint64) {
+
+	if len(largeRegularTables) == 0 {
+		return 0, 0, 0
+	}
+
+	fmt.Printf("\n=== Stage 3: Large Regular Table Deletion (%d tables) ===\n", len(largeRegularTables))
+
+	var totalDeleted, totalActuallyDeleted int
+	var totalDeletedSize uint64
+
+	for i, table := range largeRegularTables {
+		fmt.Printf("\n🔄 Processing large regular table (%d/%d): %s (%s)...\n",
+			i+1, len(largeRegularTables), table.name, datasize.ByteSize(table.size).HumanReadable())
+
+		deleted, actualDeleted, deletedSize := executeSingleLargeTableDeletion(dbPath, table, preCollectedStats, log, ctx)
+
+		totalDeleted += deleted
+		totalActuallyDeleted += actualDeleted
+		totalDeletedSize += deletedSize
+
+		// Small pause between tables to let MDBX cleanup
+		if i < len(largeRegularTables)-1 {
+			fmt.Printf("⏸️ Pausing 2 seconds before next table...\n")
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	fmt.Printf("✓ Stage 3 completed: deleted %d regular tables, freed %s\n",
+		totalActuallyDeleted, datasize.ByteSize(totalDeletedSize).HumanReadable())
+
+	return totalDeleted, totalActuallyDeleted, totalDeletedSize
+}
+
+// executeSingleNoSyncTableDeletion performs NoSync deletion for a single large NoSync table
+func executeSingleNoSyncTableDeletion(
+	dbPath string,
+	table tableSizeInfo,
+	preCollectedStats map[string]struct {
+		entries   uint64
+		sizeBytes uint64
+		pages     uint64
+	},
+	log logv3.Logger,
+	ctx context.Context,
+) (int, int, uint64) {
+
+	// Open database for this specific NoSync table
+	chaindb, err := openDatabaseWithRetry(dbPath, kv.ChainDB, log, 3)
+	if err != nil {
+		logv3.Error("Failed to open database for NoSync table deletion", "table", table.name, "error", err)
+		return 0, 0, 0
+	}
+
+	// Ensure database is closed
+	defer func() {
+		fmt.Printf("NoSync table %s completed, closing database...\n", table.name)
+		chaindb.Close()
+		fmt.Printf("✓ NoSync table %s database closed\n", table.name)
+
+		// Give MDBX more time for NoSync cleanup
+		time.Sleep(3 * time.Second)
+	}()
+
+	fmt.Printf("🗑️ Deleting large NoSync table: %s (%s)\n",
+		table.name,
+		datasize.ByteSize(table.size).HumanReadable())
+
+	// Use NoSync transaction for better performance with NoSync tables
+	var actualDeletedSize uint64
+	err = chaindb.UpdateNosync(ctx, func(tx kv.RwTx) error {
+		// Simple ClearBucket deletion for NoSync table
+		err := tx.ClearBucket(table.name)
+		if err != nil {
+			return fmt.Errorf("failed to clear NoSync table %s: %w", table.name, err)
+		}
+
+		// Track actual deleted size
+		if stats, exists := preCollectedStats[table.name]; exists {
+			actualDeletedSize = stats.sizeBytes
+			fmt.Printf("✅ Cleared large NoSync table: %s (%s, %d entries)\n",
+				table.name,
+				datasize.ByteSize(stats.sizeBytes).HumanReadable(),
+				stats.entries)
+		} else {
+			actualDeletedSize = table.size // Use table.size as fallback
+			fmt.Printf("✅ Cleared large NoSync table: %s (%s)\n",
+				table.name,
+				datasize.ByteSize(table.size).HumanReadable())
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		fmt.Printf("⚠️ Failed to delete NoSync table %s: %v\n", table.name, err)
+		return 0, 0, 0
+	}
+
+	return 1, 1, actualDeletedSize
 }
