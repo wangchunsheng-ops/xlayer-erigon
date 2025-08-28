@@ -526,7 +526,10 @@ func migrateGenesis(chaindata, input, output string) error {
 			acc.Nonce = "0x" + strconv.FormatUint(a.Nonce, 16)
 		}
 
-		log.Debug("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
+		if a.Incarnation != 1 {
+			fmt.Println("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
+			log.Info("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
+		}
 
 		if a.CodeHash.Hex() != "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" {
 			code, err := tx.GetOne(kv.Code, a.CodeHash[:])
@@ -1779,6 +1782,63 @@ func createSMTTables(db kv.RwDB, tx kv.RwTx) error {
 	return nil
 }
 
+func checkStateRoot2(chaindata, input string) error {
+	var jsonData map[string]map[string]accInfo
+	if input == "" {
+		input = "genesis.json"
+	}
+	fmt.Printf("input: %s\n", input)
+	fileData, err := os.ReadFile(input)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error reading file:", err)
+			return err
+		}
+	} else {
+		if err := json.Unmarshal(fileData, &jsonData); err != nil {
+			fmt.Println("Error decoding JSON:", err)
+			return err
+		}
+	}
+
+	ctx := context.Background()
+	db := mdbx.MustOpen(chaindata)
+	defer db.Close()
+	tx, err := db.BeginRw(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	eridb := db2.NewEriDb(nil, tx)
+	smtOrigin := smt.NewSMT(eridb, false)
+
+	address := state.ADDRESS_SCALABLE_L2
+
+	fmt.Println("total storage:", len(jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage))
+
+	start := time.Now()
+	var index int
+	for k, v := range jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage {
+		fmt.Println("index:", index)
+		keyHash := libcommon.HexToHash(k)
+		valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
+		if err != nil {
+			fmt.Printf("Error reading scalable account storage: %s\n", err)
+			return err
+		}
+		valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
+		if valInSmtHex != v {
+			fmt.Printf("key: %s, valInSmt: %s ===> valInGenesise: %s \n", k, valInSmtHex, v)
+		}
+		index++
+	}
+
+	fmt.Println("total elapsed:", time.Since(start))
+
+	return nil
+}
+
 func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) error {
 	if *deleteScalable && *ignoreScalable {
 		return fmt.Errorf("you cannot use --delete-scalable=true and --ignore-scalable=true flags together")
@@ -1819,6 +1879,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			panic(err)
 		}
 	}
+
 	eridb := db2.NewEriDb(txsmt, tx)
 	smtOrigin := smt.NewSMT(eridb, false)
 
@@ -1833,28 +1894,40 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		}
 		address := libcommon.BytesToAddress(accBytes)
 		acc := accounts.NewAccount()
-		balance, err := uint256.FromHex(value.Balance)
-		if err != nil {
-			panic(fmt.Sprintf("acc decoding error for acct: %s, err: %v", address, err))
+
+		if value.Balance != "" {
+			err := acc.Balance.SetFromHex(value.Balance)
+			if err != nil {
+				fmt.Println("balance decoding error:", err)
+				panic(fmt.Sprintf("acc decoding error for acct: %s, err: %v", address, err))
+			}
 		}
-		acc.Balance = *balance
-		nonce, err := hexutil.DecodeUint64(value.Nonce)
-		if err != nil {
-			panic("nonce decoding error")
+
+		if value.Nonce != "" {
+			nonce, err := hexutil.DecodeUint64(value.Nonce)
+			if err != nil {
+				fmt.Println("nonce decoding error", err)
+				panic("nonce decoding error")
+			}
+			acc.Nonce = nonce
 		}
-		acc.Nonce = nonce
+
 		accChanges[address] = &acc
 
-		if value.Code != "0x" {
+		if value.Code != "" && value.Code != "0x" {
 			codeChanges[address] = value.Code
 		}
 		if *ignoreScalable && address == state.ADDRESS_SCALABLE_L2 {
+			start := time.Now()
 			fmt.Printf("Ignoring scalable address: %s\n", address.String())
 
 			if value.Storage != nil {
 				storageChanges[address] = make(map[string]string)
 				fmt.Printf("number of Storage items for account %s: %d\n", address.Hex(), len(value.Storage))
-				for k, _ := range value.Storage {
+				index := 0
+				for k, v := range value.Storage {
+					fmt.Printf("storage index: %d\n", index)
+					index = index + 1
 					keyHash := libcommon.HexToHash(k)
 					valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
 					if err != nil {
@@ -1862,13 +1935,20 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 						return err
 					}
 					valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
-					storageChanges[address][k] = valInSmtHex
-					//fmt.Printf("key: %s, valInSmt: %s, valInGenesise: %s \n", k, valInSmtHex, v)
+					if valInSmtHex != v {
+						fmt.Printf("key: %s, valInSmt: %s ===> valInGenesise: %s \n", k, valInSmtHex, v)
+						storageChanges[address][k] = valInSmtHex
+					}
 				}
 			}
-			fmt.Printf("Finish override scalable storages with original storage\n")
+			fmt.Printf("Finish override scalable storages with original storage, time elasped: %s\n", time.Since(start))
 			continue
 		}
+
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"] = "0x0000000000000000000000000000000000000000000000000000000068ad8a02"
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"] = "0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb"
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"] = "0x000000000000000000000000000000000000000000000000000000000083223c"
+
 		if value.Storage != nil {
 			storageChanges[address] = make(map[string]string)
 			/// Fixme: use maps.Clone, which is more efficient
@@ -2035,11 +2115,117 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 	}
 
 	tx.Rollback()
-	if txsmt != nil {
+	if txsmt != nil && txsmt != tx {
 		txsmt.Rollback()
 	}
 
 	return nil
+}
+
+func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
+	var result [8]uint64
+
+	if scalar == nil || scalar.Sign() == 0 {
+		return result
+	}
+
+	tmp := new(big.Int).Set(scalar)
+	for i := 0; i < 8; i++ {
+		result[i] = tmp.Uint64() & 0xFFFFFFFF
+		tmp.Rsh(tmp, 32)
+	}
+
+	return result
+}
+
+func calcSmtRoot(input string) error {
+	var jsonData map[string]map[string]accInfo
+	if input == "" {
+		input = "genesis.json"
+	}
+	fmt.Printf("input: %s\n", input)
+	fileData, err := os.ReadFile(input)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error reading file:", err)
+			return err
+		}
+	} else {
+		if err := json.Unmarshal(fileData, &jsonData); err != nil {
+			fmt.Println("Error decoding JSON:", err)
+			return err
+		}
+	}
+
+	alloc := jsonData["alloc"]
+	_ = alloc
+
+	initialCapacity := 1000
+
+	type NodeKV struct {
+		Key   utils.NodeKey
+		Value [8]uint64
+	}
+
+	nodeKvs := make([]NodeKV, 0, initialCapacity)
+
+	for addr, acc := range alloc {
+		addr = libcommon.HexToAddress(addr).String()
+		balanceKey := utils.KeyEthAddrBalance(addr)
+		balanceBig := new(big.Int)
+		if !isEmpty(acc.Balance) {
+			balanceBig.SetString(acc.Balance, 16)
+		}
+		balanceValue := ScalarToArrayUint64(balanceBig)
+
+		nodeKvs = append(nodeKvs, NodeKV{
+			Key:   balanceKey,
+			Value: balanceValue,
+		})
+
+		nonceKey := utils.KeyEthAddrNonce(addr)
+		nonceBig := new(big.Int)
+		if !isEmpty(acc.Nonce) {
+			nonceBig.SetString(acc.Nonce, 16)
+		}
+		nonceValue := ScalarToArrayUint64(nonceBig)
+		nodeKvs = append(nodeKvs, NodeKV{
+			Key:   nonceKey,
+			Value: nonceValue,
+		})
+
+		slices.SortFunc(nodeKvs, func(a, b NodeKV) int {
+			leftPath := a.Key.GetPath()
+			rightPath := b.Key.GetPath()
+			for k := 0; k < 256; k++ {
+				if leftPath[k] < rightPath[k] {
+					return -1
+				}
+				if leftPath[k] > rightPath[k] {
+					return 1
+				}
+			}
+			return 0
+		})
+
+		leafValueHashes := make([]*[4]uint64, 0, len(nodeKvs))
+		leafHashes := make([]*[4]uint64, 0, len(nodeKvs))
+		for _, kv := range nodeKvs {
+			leafValueHash := utils.HashByPointers(&kv.Value, &utils.LeafCapacity)
+			leafValueHashes = append(leafValueHashes, leafValueHash)
+			var in [8]uint64
+			copy(in[0:4], kv.Key[:])
+			copy(in[4:8], leafValueHash[:])
+			leafHashes = append(leafHashes, utils.HashByPointers(&in, &utils.LeafCapacity))
+		}
+
+	}
+
+	return nil
+}
+
+func isEmpty(s string) bool {
+	return s == "" || s == "0x0"
 }
 
 func getSmtroot(chaindata string) error {
@@ -2212,6 +2398,8 @@ func main() {
 		} else {
 			err = checkStateRoot(*chaindata, "", *input, *incremental, *debugPrint)
 		}
+	case "checkStateRoot2":
+		err = checkStateRoot2(*chaindata, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
 	default:
