@@ -19,6 +19,64 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// Define local table configurations to avoid modifying erigon-lib
+var localChaindataTablesCfg = kv.TableCfg{}
+var localSmtTablesCfg = kv.TableCfg{}
+
+// SMT tables - ONLY the 5 pure SMT tables that actually exist in SMT database
+var smtTableNames = []string{
+	"HermezSmt",
+	"HermezSmtStats",
+	"HermezSmtAccountValues",
+	"HermezSmtMetadata",
+	"HermezSmtHashKey",
+}
+
+func getTableCfgForLabel(label kv.Label) kv.TableCfg {
+	if label == kv.SmtDB {
+		// Initialize SMT table config if needed
+		if len(localSmtTablesCfg) == 0 {
+			localSmtTablesCfg = kv.TableCfg{}
+
+			// Add deprecated chaindata tables (as expected by erigon-lib)
+			for name, cfg := range kv.ChaindataTablesCfg {
+				tmp := cfg
+				tmp.IsDeprecated = true // Mark chaindata tables as deprecated in SMT DB
+				localSmtTablesCfg[name] = tmp
+			}
+
+			// Add NON-deprecated SMT tables
+			for _, tableName := range smtTableNames {
+				localSmtTablesCfg[tableName] = kv.TableCfgItem{
+					Flags:        kv.Default,
+					IsDeprecated: false, // CRITICAL: SMT tables must not be deprecated
+				}
+			}
+		}
+		return localSmtTablesCfg
+	}
+
+	// For chaindata, build a clean config without SMT tables
+	if len(localChaindataTablesCfg) == 0 {
+		localChaindataTablesCfg = kv.TableCfg{}
+
+		// Create a set of SMT table names for fast lookup
+		smtTablesSet := make(map[string]bool)
+		for _, tableName := range smtTableNames {
+			smtTablesSet[tableName] = true
+		}
+
+		// Copy all non-SMT tables from the global config
+		for name, cfg := range kv.ChaindataTablesCfg {
+			if !smtTablesSet[name] {
+				localChaindataTablesCfg[name] = cfg
+			}
+		}
+	}
+
+	return localChaindataTablesCfg
+}
+
 func main() {
 	log := logv3.New()
 	log.SetHandler(logv3.LvlFilterHandler(logv3.LvlInfo, logv3.StdoutHandler))
@@ -177,9 +235,15 @@ func main() {
 
 	// Additional safety check: verify source database is not locked
 	fmt.Printf("Verifying database accessibility...\n")
+
+	// Initialize SMT configuration if needed
+	if label == kv.SmtDB {
+		kv.InitStandaloneSMT(true) // SMT standalone mode
+	}
+
 	testDB := mdbx2.NewMDBX(log).Path(*sourceDBPath).
 		Label(label).
-		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return getTableCfgForLabel(label) }).
 		Readonly().
 		MustOpen()
 	testDB.Close()
@@ -198,7 +262,15 @@ func main() {
 	ctx := context.Background()
 	// Use maximum read-ahead threads for better I/O
 	optimizedThreads := backup.ReadAheadThreads * 2 // Double the threads
-	err = backup.Kv2kv(ctx, src, dst, nil, optimizedThreads, log)
+
+	// For SMT databases, we need special handling due to erigon-lib marking SMT tables as deprecated
+	if label == kv.SmtDB {
+		fmt.Printf("SMT compaction: manually copying %d SMT tables\n", len(smtTableNames))
+		err = manualSmtCopy(ctx, src, dst, smtTableNames, optimizedThreads, log)
+	} else {
+		// Use standard backup for chaindata
+		err = backup.Kv2kv(ctx, src, dst, nil, optimizedThreads, log)
+	}
 
 	// Explicitly close connections before further operations
 	src.Close()
@@ -338,9 +410,14 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 	}
 
 	// Open database for table analysis
+	// Initialize SMT configuration if needed
+	if label == kv.SmtDB {
+		kv.InitStandaloneSMT(true) // SMT standalone mode
+	}
+
 	db := mdbx2.NewMDBX(logger).Path(dbPath).
 		Label(label).
-		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return getTableCfgForLabel(label) }).
 		Readonly().
 		MustOpen()
 	defer db.Close()
@@ -366,14 +443,30 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 
 	var tableSize uint64
 	pageSize := db.PageSize()
+
+	fmt.Printf("\n=== Found Tables in Database ===\n")
+	fmt.Printf("Total tables found: %d\n", len(tables))
+
+	var foundTables []string
 	for _, tableName := range tables {
 		stat, err := mdbxTx.BucketStat(tableName)
 		if err != nil {
+			fmt.Printf("❌ %s (error: %v)\n", tableName, err)
 			continue // Skip failed tables
 		}
 		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
 		tableSize += totalPages * pageSize
+
+		size := totalPages * pageSize
+		if stat.Entries > 0 {
+			fmt.Printf("✅ %s (%d entries, %s)\n", tableName, stat.Entries, datasize.ByteSize(size).HumanReadable())
+			foundTables = append(foundTables, tableName)
+		} else {
+			fmt.Printf("🔹 %s (empty)\n", tableName)
+		}
 	}
+
+	fmt.Printf("\nNon-empty tables: %d\n", len(foundTables))
 
 	// Return actual disk usage and table data size
 	return actualFileSize, tableSize, nil
@@ -383,11 +476,16 @@ func analyzeDatabase(dbPath string, label kv.Label, logger logv3.Logger) (uint64
 func openOptimizedCompactPair(from, to string, label kv.Label, logger logv3.Logger) (kv.RoDB, kv.RwDB) {
 	const OptimizedThreadsLimit = 16_000 // Increased from default 9_000
 
+	// Initialize SMT configuration if needed
+	if label == kv.SmtDB {
+		kv.InitStandaloneSMT(true) // SMT standalone mode
+	}
+
 	// Source database with maximum read optimization
 	src := mdbx2.NewMDBX(logger).Path(from).
 		Label(label).
 		RoTxsLimiter(semaphore.NewWeighted(OptimizedThreadsLimit)).
-		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return getTableCfgForLabel(label) }).
 		Flags(func(flags uint) uint {
 			// Enable read optimizations - remove NoReadahead for better prefetching
 			return flags | mdbx.Accede | mdbx.LifoReclaim&^mdbx.NoReadahead
@@ -411,8 +509,90 @@ func openOptimizedCompactPair(from, to string, label kv.Label, logger logv3.Logg
 			// Enable write optimizations
 			return flags | mdbx.WriteMap | mdbx.LifoReclaim | mdbx.SafeNoSync
 		}).
-		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return kv.TablesCfgByLabel(label) }).
+		WithTableCfg(func(_ kv.TableCfg) kv.TableCfg { return getTableCfgForLabel(label) }).
 		MustOpen()
 
 	return src, dst
+}
+
+// manualSmtCopy bypasses erigon-lib's deprecated table logic for SMT tables
+func manualSmtCopy(ctx context.Context, src kv.RoDB, dst kv.RwDB, tables []string, readAheadThreads int, logger logv3.Logger) error {
+	srcTx, err := src.BeginRo(ctx)
+	if err != nil {
+		return err
+	}
+	defer srcTx.Rollback()
+
+	for _, tableName := range tables {
+		// Check if table exists and has data
+		srcCursor, err := srcTx.Cursor(tableName)
+		if err != nil {
+			// Table doesn't exist, skip it
+			fmt.Printf("⚠️  Table %s does not exist, skipping\n", tableName)
+			continue
+		}
+
+		// Check if table has any data
+		k, _, err := srcCursor.First()
+		if err != nil || k == nil {
+			// Table is empty, skip it
+			fmt.Printf("🔹 Table %s is empty, skipping\n", tableName)
+			continue
+		}
+
+		// Table has data, copy it
+		fmt.Printf("📋 Copying table %s...\n", tableName)
+
+		// Create and clear destination table first
+		if err := dst.Update(ctx, func(tx kv.RwTx) error {
+			if err := tx.(kv.BucketMigrator).CreateBucket(tableName); err != nil {
+				// Table might already exist, that's OK
+			}
+			return tx.ClearBucket(tableName)
+		}); err != nil {
+			return fmt.Errorf("failed to prepare destination table %s: %w", tableName, err)
+		}
+
+		// Copy all data
+		dstTx, err := dst.BeginRw(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin destination transaction: %w", err)
+		}
+
+		dstCursor, err := dstTx.RwCursor(tableName)
+		if err != nil {
+			dstTx.Rollback()
+			return fmt.Errorf("failed to open destination cursor for %s: %w", tableName, err)
+		}
+
+		// Reset source cursor and copy all entries
+		srcCursor, err = srcTx.Cursor(tableName)
+		if err != nil {
+			dstTx.Rollback()
+			return fmt.Errorf("failed to reopen source cursor for %s: %w", tableName, err)
+		}
+
+		entryCount := 0
+		for k, v, err := srcCursor.First(); k != nil; k, v, err = srcCursor.Next() {
+			if err != nil {
+				dstTx.Rollback()
+				return fmt.Errorf("failed to read from source table %s: %w", tableName, err)
+			}
+
+			if err = dstCursor.Append(k, v); err != nil {
+				dstTx.Rollback()
+				return fmt.Errorf("failed to write to destination table %s: %w", tableName, err)
+			}
+			entryCount++
+		}
+
+		if err := dstTx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit destination transaction for %s: %w", tableName, err)
+		}
+
+		fmt.Printf("✅ Copied %d entries in table %s\n", entryCount, tableName)
+	}
+
+	logger.Info("SMT manual copy completed")
+	return nil
 }
