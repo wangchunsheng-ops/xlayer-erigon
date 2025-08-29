@@ -182,6 +182,11 @@ func StageLoopIteration(ctx context.Context, db kv.RwDB, txc wrap.TxContainer, s
 	if canRunCycleInOneTransaction && !externalTx && commitTime > 500*time.Millisecond {
 		logger.Info("Commit cycle", "in", commitTime)
 	}
+	if canRunCycleInOneTransaction {
+		logger.Info("Commit cycle, use one transaction")
+	} else {
+		logger.Info("Commit cycle, not use one transaction")
+	}
 	//if len(logCtx) > 0 { // No printing of timings or table sizes if there were no progress
 	var m runtime.MemStats
 	dbg.ReadMemStats(&m)
