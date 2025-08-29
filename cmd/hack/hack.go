@@ -1830,6 +1830,19 @@ func debugScalable(chaindata, smtdata, input string) error {
 
 	fmt.Println("total storage:", len(jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage))
 
+	for _, k := range []string{"0x0000000000000000000000000000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000000000000000000000000000003"} {
+		keyHash := libcommon.HexToHash(k)
+		valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
+		if err != nil {
+			fmt.Printf("Error reading scalable account storage: %s\n", err)
+			return err
+		}
+		valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
+		fmt.Println("key:", k)
+		fmt.Println("  	dump:", jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage[k])
+		fmt.Println("  	smt:", valInSmtHex)
+	}
+
 	start := time.Now()
 	var index int
 	for k, v := range jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage {
