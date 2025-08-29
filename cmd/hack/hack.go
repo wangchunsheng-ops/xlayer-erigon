@@ -2306,16 +2306,65 @@ func calcSmtRoot(input string) error {
 					})
 				}
 
-				for k, v := range acc.Storage {
+				if len(acc.Storage) > 100000 {
+					// 将 storage 转换为切片以便分片
+					storageKeys := make([]string, 0, len(acc.Storage))
+					for k := range acc.Storage {
+						storageKeys = append(storageKeys, k)
+					}
+
+					// 计算每个 worker 处理的数量
+					numStorageWorkers := runtime.NumCPU()
+					storageChunkSize := (len(storageKeys) + numStorageWorkers - 1) / numStorageWorkers
+
+					var storageWg sync.WaitGroup
+					var storageMu sync.Mutex
 					addrBig := utils.ConvertHexToBigInt(addr)
 					addrArr := utils.ScalarToArrayUint64(addrBig)
-					storageBig := utils.ConvertHexToBigInt(v)
-					storageValue := utils.ScalarToArrayUint64(storageBig)
-					storageKey := KeyContractStorageHack(addrArr, k)
-					localKvs = append(localKvs, &NodeKV{
-						Key:   storageKey,
-						Value: storageValue,
-					})
+
+					// 并发处理 storage
+					for i := 0; i < len(storageKeys); i += storageChunkSize {
+						end := i + storageChunkSize
+						if end > len(storageKeys) {
+							end = len(storageKeys)
+						}
+
+						storageWg.Add(1)
+						go func(keys []string) {
+							defer storageWg.Done()
+							localStorageKvs := make([]*NodeKV, 0, len(keys))
+
+							for _, k := range keys {
+								v := acc.Storage[k]
+								storageBig := utils.ConvertHexToBigInt(v)
+								storageValue := utils.ScalarToArrayUint64(storageBig)
+								storageKey := KeyContractStorageHack(addrArr, k)
+								localStorageKvs = append(localStorageKvs, &NodeKV{
+									Key:   storageKey,
+									Value: storageValue,
+								})
+							}
+
+							storageMu.Lock()
+							localKvs = append(localKvs, localStorageKvs...)
+							storageMu.Unlock()
+						}(storageKeys[i:end])
+					}
+
+					storageWg.Wait()
+				} else {
+					// storage 数量较少时顺序处理
+					addrBig := utils.ConvertHexToBigInt(addr)
+					addrArr := utils.ScalarToArrayUint64(addrBig)
+					for k, v := range acc.Storage {
+						storageBig := utils.ConvertHexToBigInt(v)
+						storageValue := utils.ScalarToArrayUint64(storageBig)
+						storageKey := KeyContractStorageHack(addrArr, k)
+						localKvs = append(localKvs, &NodeKV{
+							Key:   storageKey,
+							Value: storageValue,
+						})
+					}
 				}
 			}
 
