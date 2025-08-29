@@ -101,6 +101,8 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 		"hermez_intermediate_tx_stateRoots", // l2blockno + txhash
 	}
 
+	// Note: CanonicalHeader is excluded from moderate mode to maintain table consistency
+
 	for i, blockNo := range blockNos {
 		if i%1000 == 0 {
 			fmt.Printf("Copying block %d (%d/%d)...\n", blockNo, i+1, len(blockNos))
@@ -121,6 +123,8 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 				blockData.Data[table] = append([]byte{}, data...) // Deep copy
 			}
 		}
+
+		// Note: CanonicalHeader copying is excluded from moderate mode
 
 		// Copy data from composite key tables (need to find all keys starting with block_num)
 		for _, table := range compositeKeyTables {
@@ -358,70 +362,6 @@ func deserializeEntries(data []byte) ([]KeyValueEntry, error) {
 
 	if err := decoder.Decode(&entries); err != nil {
 		return nil, err
-	}
-
-	return entries, nil
-}
-
-// Note: getLatestBlockNumber function is defined in partial_cleanup.go
-
-// copyAccountChangeSetData and copyStorageChangeSetData are preserved here but NOT used in Moderate mode
-// In Moderate mode: AccountChangeSet and StorageChangeSet are completely untouched (never cleared)
-// In Aggressive mode: These functions would be used with special dupCursor handling
-//
-// Historical state tables remain intact in Moderate mode to maintain RPC functionality
-
-// copyAccountChangeSetData copies AccountChangeSet entries for a specific block (Aggressive mode only)
-func copyAccountChangeSetData(tx kv.RwTx, blockNo uint64) ([]KeyValueEntry, error) {
-	cursor, err := tx.CursorDupSort("AccountChangeSet")
-	if err != nil {
-		return nil, err // Table might not exist
-	}
-	defer cursor.Close()
-
-	blockKey := make([]byte, 8)
-	binary.BigEndian.PutUint64(blockKey, blockNo)
-
-	var entries []KeyValueEntry
-
-	// Find all entries for this block using DupCursor
-	for key, value, err := cursor.Seek(blockKey); key != nil && bytes.Equal(key, blockKey); key, value, err = cursor.NextDup() {
-		if err != nil {
-			return nil, err
-		}
-
-		entries = append(entries, KeyValueEntry{
-			Key:   common.Copy(key),
-			Value: common.Copy(value),
-		})
-	}
-
-	return entries, nil
-}
-
-// copyStorageChangeSetData copies StorageChangeSet entries for a specific block (Aggressive mode only)
-func copyStorageChangeSetData(tx kv.RwTx, blockNo uint64) ([]KeyValueEntry, error) {
-	cursor, err := tx.CursorDupSort("StorageChangeSet")
-	if err != nil {
-		return nil, err // Table might not exist
-	}
-	defer cursor.Close()
-
-	blockKey := make([]byte, 8)
-	binary.BigEndian.PutUint64(blockKey, blockNo)
-
-	var entries []KeyValueEntry
-
-	// Find all entries for this block using DupCursor
-	for key, value, err := cursor.Seek(blockKey); key != nil && bytes.Equal(key, blockKey); key, value, err = cursor.NextDup() {
-		if err != nil {
-			return nil, err
-		}
-
-		entries = append(entries, KeyValueEntry{
-			Key:   common.Copy(key),
-			Value: common.Copy(value),
-		})
 	}
 
 	return entries, nil

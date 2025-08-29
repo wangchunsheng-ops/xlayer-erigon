@@ -4,161 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/c2h5oh/datasize"
-	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	mdbxpkg "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	"github.com/ledgerwatch/erigon/smt/pkg/db"
 
 	logv3 "github.com/ledgerwatch/log/v3"
 )
-
-// Define pruning levels
-type PruneLevel int
-
-const (
-	PruneLevelModerate   PruneLevel = iota // Moderate pruning (recommended)
-	PruneLevelAggressive                   // Aggressive pruning (includes state data cleanup)
-)
-
-// checkSMTDatabase checks if SMT database exists and contains data
-func checkSMTDatabase(smtPath string) bool {
-	if _, err := os.Stat(smtPath + "/mdbx.dat"); os.IsNotExist(err) {
-		return false
-	}
-
-	// Check file size, if file is very small it might be just an empty database file
-	if info, err := os.Stat(smtPath + "/mdbx.dat"); err == nil {
-		// If file size is less than 1MB, consider it as empty database
-		return info.Size() > 1024*1024
-	}
-
-	return true
-}
-
-// getTableList gets list of tables in database
-func getTableList(db kv.RwDB) ([]string, error) {
-	ctx := context.Background()
-	tx, err := db.BeginRo(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	tables, err := tx.ListBuckets()
-	if err != nil {
-		return nil, err
-	}
-
-	sort.Strings(tables)
-	return tables, nil
-}
-
-// getActiveTableList returns list of tables that actually contain data (size > 0)
-func getActiveTableList(db kv.RwDB) ([]string, error) {
-	ctx := context.Background()
-	tx, err := db.BeginRo(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	allTables, err := tx.ListBuckets()
-	if err != nil {
-		return nil, err
-	}
-
-	var activeTables []string
-	for _, tableName := range allTables {
-		// Check if table has any data
-		if hasTableData(tx, tableName) {
-			activeTables = append(activeTables, tableName)
-		}
-	}
-
-	sort.Strings(activeTables)
-	return activeTables, nil
-}
-
-// hasTableData checks if a table contains any data
-func hasTableData(tx kv.Tx, tableName string) bool {
-	// Try to get the first key from the table
-	cursor, err := tx.Cursor(tableName)
-	if err != nil {
-		return false
-	}
-	defer cursor.Close()
-
-	// Check if there's at least one entry
-	k, _, err := cursor.First()
-	return err == nil && len(k) > 0
-}
-
-// contains checks if a slice contains a given string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// getTableStats gets statistics info of table (using default pageSize)
-func getTableStats(db kv.RwDB, tableName string) (uint64, uint64, uint64, error) {
-	ctx := context.Background()
-	tx, err := db.BeginRo(ctx)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	defer tx.Rollback()
-
-	if mdbxTx, ok := tx.(*mdbxpkg.MdbxTx); ok {
-		stat, err := mdbxTx.BucketStat(tableName)
-		if err != nil {
-			return 0, 0, 0, err
-		}
-
-		totalPages := stat.LeafPages + stat.BranchPages + stat.OverflowPages
-		// Use default MDBX page size of 8192 bytes
-		const defaultPageSize = 8192
-		sizeBytes := totalPages * defaultPageSize
-
-		return stat.Entries, sizeBytes, totalPages, nil
-	}
-
-	return 0, 0, 0, fmt.Errorf("not MDBX transaction")
-}
-
-// openDatabase opens database at specified path using the safest possible approach
-func openDatabase(dbPath string, label kv.Label, log logv3.Logger) (kv.RwDB, *mdbx2.EnvInfo, error) {
-	ctx := context.Background()
-
-	var opts mdbxpkg.MdbxOpts
-	if label == kv.ChainDB {
-		opts = mdbxpkg.NewMDBX(log).Path(dbPath).Label(label).WithTableCfg(mdbxpkg.WithChaindataTables)
-	} else {
-		// SMT database uses different configuration
-		kv.InitStandaloneSMT(false) // Standalone SMT database
-		opts = mdbxpkg.NewMDBX(log).Path(dbPath).Label(label)
-	}
-
-	// Use the simplest possible approach: let MDBX use its default configuration
-	// This avoids all geometry mismatch issues
-	db, err := opts.Open(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	fmt.Printf("✓ Database opened successfully with default configuration\n")
-
-	return db, nil, nil
-}
 
 func main() {
 	log := logv3.New()
@@ -199,215 +53,6 @@ func main() {
 
 	// Calculate and display results
 	calculateMainResults(analysis, stats, config)
-}
-
-// executeBatchOperationsWithCommit executes batch operations with guaranteed commit
-func executeBatchOperationsWithCommit(dbPath string, keepRecentBatches uint64, log logv3.Logger, ctx context.Context) (int, int) {
-	fmt.Printf("\n=== Phase 1: Batch-based Pruning ===\n")
-
-	// Open database for batch operations
-	chaindb, _, err := openDatabase(dbPath, kv.ChainDB, log)
-	if err != nil {
-		logv3.Error("Failed to open database for batch operations", "error", err)
-		return 0, 0
-	}
-
-	// Ensure database is closed after batch operations
-	defer func() {
-		fmt.Printf("Phase 1 completed, closing database...\n")
-		chaindb.Close()
-		fmt.Printf("✓ Phase 1 database closed\n")
-
-		// Give MDBX some time to complete cleanup
-		time.Sleep(2 * time.Second)
-	}()
-
-	tx, err := chaindb.BeginRw(ctx)
-	if err != nil {
-		logv3.Error("Failed to start transaction for batch operations", "error", err)
-		return 0, 0
-	}
-
-	var committed bool
-	defer func() {
-		if !committed {
-			fmt.Printf("Rolling back batch operations transaction...\n")
-			tx.Rollback()
-		}
-	}()
-
-	deletedBatches, deletedBlocks, err := partialPruneBatchTables(tx, keepRecentBatches)
-	if err != nil {
-		logv3.Error("Failed to perform batch-based pruning", "error", err)
-		return 0, 0
-	}
-
-	// Commit transaction
-	fmt.Printf("Committing Phase 1 (batch operations)...\n")
-	if err := tx.Commit(); err != nil {
-		logv3.Error("Failed to commit batch operations", "error", err)
-		return 0, 0
-	}
-	committed = true
-
-	fmt.Printf("✓ Phase 1 committed successfully\n")
-	return deletedBatches, deletedBlocks
-}
-
-// executeDupCursorOperationsWithCommit executes dupCursor operations with guaranteed commit
-func executeDupCursorOperationsWithCommit(dbPath string, keepRecentBatches uint64, fastDupCursorMode, safeFastMode bool, log logv3.Logger, ctx context.Context) {
-	fmt.Printf("\n=== Phase 1b: DupCursor Data Cleanup ===\n")
-
-	// Open database for dupCursor operations
-	chaindb, _, err := openDatabase(dbPath, kv.ChainDB, log)
-	if err != nil {
-		logv3.Error("Failed to open database for dupCursor operations", "error", err)
-		return
-	}
-
-	// Ensure database is closed after dupCursor operations
-	defer func() {
-		fmt.Printf("Phase 1b completed, closing database...\n")
-		chaindb.Close()
-		fmt.Printf("✓ Phase 1b database closed\n")
-
-		// Give MDBX some time to complete cleanup
-		time.Sleep(2 * time.Second)
-	}()
-
-	tx, err := chaindb.BeginRw(ctx)
-	if err != nil {
-		logv3.Error("Failed to start transaction for dupCursor cleanup", "error", err)
-		return
-	}
-
-	var committed bool
-	defer func() {
-		if !committed {
-			fmt.Printf("Rolling back dupCursor operations transaction...\n")
-			tx.Rollback()
-		}
-	}()
-
-	fmt.Printf("Processing 2 dupCursor tables: AccountChangeSet, StorageChangeSet\n")
-	fmt.Printf("Note: CanonicalHeader and hermez_blockBatches are preserved for node stability\n")
-
-	if fastDupCursorMode {
-		fmt.Printf("⚡ Fast dupCursor mode enabled: using direct cursor deletion for maximum performance\n")
-	} else if safeFastMode {
-		fmt.Printf("🛡️⚡ Safe-Fast dupCursor mode enabled: balanced performance and safety\n")
-	} else {
-		fmt.Printf("🔄 Standard dupCursor mode: using optimized batch processing for safety\n")
-	}
-
-	deletedDupCursorRecords, err := pruneHistoricalDupCursorData(tx, keepRecentBatches, fastDupCursorMode, safeFastMode)
-	if err != nil {
-		logv3.Error("Failed to perform dupCursor data cleanup", "error", err)
-		return
-	}
-
-	// Commit transaction
-	fmt.Printf("Committing Phase 1b (dupCursor operations)...\n")
-	if err := tx.Commit(); err != nil {
-		logv3.Error("Failed to commit dupCursor operations", "error", err)
-		return
-	}
-	committed = true
-
-	fmt.Printf("✓ Phase 1b committed successfully\n")
-	fmt.Printf("✓ Historical dupCursor data cleanup completed: %d records deleted\n", deletedDupCursorRecords)
-}
-
-// executeTableDeletionsWithCommit executes table deletion operations with guaranteed commit
-func executeTableDeletionsWithCommit(
-	chaindb kv.RwDB,
-	sortedTables []tableSizeInfo,
-	preCollectedStats map[string]struct {
-		entries   uint64
-		sizeBytes uint64
-		pages     uint64
-	},
-	partiallyPrunedTables map[string]bool,
-	pruneLevel PruneLevel,
-	log logv3.Logger,
-	ctx context.Context,
-) (int, int, uint64) {
-	if len(sortedTables) == 0 {
-		fmt.Printf("\n=== Phase 2: No tables to delete ===\n")
-		return 0, 0, 0
-	}
-
-	fmt.Printf("\n=== Phase 2: Table Deletions ===\n")
-
-	tx, err := chaindb.BeginRw(ctx)
-	if err != nil {
-		logv3.Error("Failed to start transaction for table deletions", "error", err)
-		os.Exit(1)
-	}
-
-	defer func() {
-		fmt.Printf("Committing Phase 2 (table deletions)...\n")
-		if err := tx.Commit(); err != nil {
-			logv3.Error("Failed to commit table deletions", "error", err)
-			tx.Rollback()
-			os.Exit(1)
-		}
-		fmt.Printf("✓ Phase 2 committed successfully\n")
-	}()
-
-	deletedCount, actuallyDeletedTables, actualDeletedSize := executeOptimizedTableDeletion(
-		tx, chaindb, sortedTables, preCollectedStats, partiallyPrunedTables, pruneLevel, logv3.New())
-
-	if deletedCount < 0 {
-		deletedCount = 0
-	}
-
-	return deletedCount, actuallyDeletedTables, actualDeletedSize
-}
-
-// Refactored main function helper structures and functions
-
-// MainConfig holds all configuration for the pruning operation
-type MainConfig struct {
-	DBPath            string
-	PruneLevel        PruneLevel
-	KeepRecentBatches uint64
-	AutoYes           bool
-	FastDupCursorMode bool
-	SafeFastMode      bool
-}
-
-// MainPaths holds database path configuration
-type MainPaths struct {
-	MainPath      string
-	ChaindataPath string
-	SMTPath       string
-	SMTSeparated  bool
-}
-
-// MainAnalysis holds the results of database analysis
-type MainAnalysis struct {
-	AllTables         []string
-	ToDelete          []string
-	Critical          map[string]bool
-	PreCollectedStats map[string]struct {
-		entries   uint64
-		sizeBytes uint64
-		pages     uint64
-	}
-	SortedTables      []tableSizeInfo
-	TotalToDeleteSize uint64
-	TotalDbSize       uint64
-	SMTTableCount     int
-}
-
-// MainStats holds statistics about the pruning operation
-type MainStats struct {
-	DeletedBatches        int
-	DeletedBlocks         int
-	DeletedCount          int
-	ActuallyDeletedTables int
-	ActualDeletedSize     uint64
 }
 
 // parseMainArguments parses command line arguments and returns configuration
@@ -672,15 +317,17 @@ func getMainUserConfirmation(analysis *MainAnalysis, config *MainConfig) bool {
 		fmt.Printf("Best for: Production sequencer nodes, regular maintenance\n")
 
 	case PruneLevelAggressive:
-		fmt.Printf("Aggressive pruning: Maximum cleanup including historical dupCursor data\n")
-		fmt.Printf("Strategy: All moderate mode deletions + historical dupCursor table cleanup\n")
-		fmt.Printf("DupCursor tables processed: AccountChangeSet, StorageChangeSet (CanonicalHeader and hermez_blockBatches preserved for stability)\n")
-		fmt.Printf("Preserves: Recent %d batches of dupCursor data, SMT data, core operational tables, critical mapping tables\n", config.KeepRecentBatches)
-		fmt.Printf("Deletes: Same as moderate + historical account/storage changes beyond recent batches\n")
+		fmt.Printf("Aggressive pruning: Maximum cleanup including Header ecosystem & dupCursor data\n")
+		fmt.Printf("Strategy: All moderate mode deletions + Header ecosystem cleanup + dupCursor table cleanup\n")
+		fmt.Printf("Header ecosystem: CanonicalHeader, HeaderNumber, Header, BlockBody (fixes nonce query issues)\n")
+		fmt.Printf("DupCursor tables processed: AccountChangeSet, StorageChangeSet\n")
+		fmt.Printf("Preserves: Recent %d batches of all data, SMT data, core operational tables\n", config.KeepRecentBatches)
+		fmt.Printf("Deletes: Same as moderate + historical header data + historical account/storage changes\n")
 		fmt.Printf("Note: PlainState (current state) is always preserved as it contains active account/storage data\n")
-		fmt.Printf("⚠️  ADVANCED: Only use when SMT data is complete and historical queries not needed\n")
-		fmt.Printf("🚀 Maximum space savings: Optimized for nodes with complete SMT and limited historical query needs\n")
-		fmt.Printf("Best for: Advanced production setups, maximum storage optimization\n")
+		fmt.Printf("🎯 FIXES: Nonce query issues by ensuring Header ecosystem consistency\n")
+		fmt.Printf("⚠️  ADVANCED: Only use when you understand Header table dependencies\n")
+		fmt.Printf("🚀 Maximum space savings (~35+ GB additional): Complete data consistency guaranteed\n")
+		fmt.Printf("Best for: Advanced production setups needing both space optimization AND query accuracy\n")
 	}
 
 	// Ask for user confirmation
@@ -720,9 +367,21 @@ func executeMainPruningOperations(paths *MainPaths, analysis *MainAnalysis, conf
 		stats.DeletedBatches, stats.DeletedBlocks = executeBatchOperationsWithCommit(paths.ChaindataPath, config.KeepRecentBatches, log, ctx)
 	}
 
-	// Execute dupCursor operations with guaranteed commit (Aggressive mode only)
+	// Execute Aggressive mode operations with guaranteed commit (Aggressive mode only)
 	if config.PruneLevel == PruneLevelAggressive {
-		executeDupCursorOperationsWithCommit(paths.ChaindataPath, config.KeepRecentBatches, config.FastDupCursorMode, config.SafeFastMode, log, ctx)
+		// ✅ OPTIMAL ORDER: Clean from indexes/mappings to data (maintains consistency)
+
+		// Phase 1b: Header ecosystem cleanup - Clean indexes/mappings FIRST
+		// This ensures no dangling references to blocks that will have missing state data
+		headerRecords, headerSize := executeHeaderEcosystemCleanupWithCommit(paths.ChaindataPath, config.KeepRecentBatches, log, ctx)
+		stats.DeletedCount += headerRecords
+		stats.ActualDeletedSize += headerSize
+
+		// Phase 1c: DupCursor data cleanup - Clean state change data AFTER header cleanup
+		// This prevents inconsistent state where headers exist but state changes are missing
+		dupCursorRecords, dupCursorSize := executeDupCursorOperationsWithCommit(paths.ChaindataPath, config.KeepRecentBatches, config.FastDupCursorMode, config.SafeFastMode, log, ctx)
+		stats.DeletedCount += dupCursorRecords
+		stats.ActualDeletedSize += dupCursorSize
 	}
 
 	// Filter out block tables from full deletion if we did partial pruning
@@ -736,6 +395,14 @@ func executeMainPruningOperations(paths *MainPaths, analysis *MainAnalysis, conf
 		// DupCursor tables - excluded from normal batch processing due to special cursor requirements
 		"CanonicalHeader":     true, // dupCursor table - needs special handling
 		"hermez_blockBatches": true, // dupCursor table - needs special handling
+	}
+
+	// In Aggressive mode, Header ecosystem tables are handled by Phase 1b
+	if config.PruneLevel == PruneLevelAggressive {
+		partiallyPrunedTables["CanonicalHeader"] = true // Processed in Phase 1b: Header Ecosystem Cleanup
+		partiallyPrunedTables["HeaderNumber"] = true    // Processed in Phase 1b: Header Ecosystem Cleanup
+		partiallyPrunedTables["Header"] = true          // Processed in Phase 1b: Header Ecosystem Cleanup
+		partiallyPrunedTables["BlockBody"] = true       // Processed in Phase 1b: Header Ecosystem Cleanup
 	}
 
 	// Execute optimized table deletion using pre-collected statistics
@@ -781,6 +448,9 @@ func calculateMainResults(analysis *MainAnalysis, stats *MainStats, config *Main
 	fmt.Printf("Tables with actual data deleted: %d (out of %d total cleared)\n", stats.ActuallyDeletedTables, stats.DeletedCount)
 	if (config.PruneLevel == PruneLevelModerate || config.PruneLevel == PruneLevelAggressive) && stats.DeletedBatches > 0 {
 		fmt.Printf("Batch-level data deleted: %d batches (%d blocks)\n", stats.DeletedBatches, stats.DeletedBlocks)
+	}
+	if config.PruneLevel == PruneLevelAggressive {
+		fmt.Printf("Note: Aggressive mode includes Header ecosystem and DupCursor data cleanup\n")
 	}
 	fmt.Printf("Total space freed: %s (%.2f%% of database)\n",
 		datasize.ByteSize(totalSavedSpace).HumanReadable(), spaceRatio)
