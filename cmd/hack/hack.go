@@ -14,10 +14,12 @@ import (
 	_ "net/http/pprof" //nolint:gosec
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutil"
@@ -2122,22 +2124,6 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 	return nil
 }
 
-func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
-	var result [8]uint64
-
-	if scalar == nil || scalar.Sign() == 0 {
-		return result
-	}
-
-	tmp := new(big.Int).Set(scalar)
-	for i := 0; i < 8; i++ {
-		result[i] = tmp.Uint64() & 0xFFFFFFFF
-		tmp.Rsh(tmp, 32)
-	}
-
-	return result
-}
-
 func TinyScalarToArrayUint64(scalar uint64) [8]uint64 {
 	var result [8]uint64
 
@@ -2148,11 +2134,12 @@ func TinyScalarToArrayUint64(scalar uint64) [8]uint64 {
 }
 
 type NodeKV struct {
-	Key      utils.NodeKey
-	Value    [8]uint64
-	leafHash [4]uint64
-	level    int // [0, 255]
-	path     []int
+	Key       utils.NodeKey
+	Value     [8]uint64
+	leafHash  [4]uint64
+	level     int // [0, 255]
+	path      []int
+	shortPath [4]uint64 // 用4个uint64存储256个bit
 }
 
 func calculateLevels(nodeKvs []NodeKV, startLevel int) {
@@ -2185,7 +2172,7 @@ func calculateLevels(nodeKvs []NodeKV, startLevel int) {
 
 func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey {
 	storageKeyBig := utils.ConvertHexToBigInt(storageKey)
-	storageKeyArr := ScalarToArrayUint64(storageKeyBig)
+	storageKeyArr := utils.ScalarToArrayUint64(storageKeyBig)
 	hk0 := utils.Hash(storageKeyArr, utils.BranchCapacity)
 	var key1 = [8]uint64{ethaddr[0], ethaddr[1], ethaddr[2], ethaddr[3], ethaddr[4], ethaddr[5], uint64(utils.SC_STORAGE), uint64(0)}
 	return utils.Hash(key1, hk0)
@@ -2234,73 +2221,117 @@ func calcSmtRoot(input string) error {
 		}
 	}
 
-	initialCapacity := len(alloc)
-
-	nodeKvs := make([]NodeKV, 0, initialCapacity)
+	nodeKvs := make([]NodeKV, 0)
 
 	start1 := time.Now()
-	for addr, acc := range alloc {
-		addr = libcommon.HexToAddress(addr).String()
-		if !isEmpty(acc.Balance) {
-			balanceKey := utils.KeyEthAddrBalance(addr)
-			balanceBig := utils.ConvertHexToBigInt(acc.Balance)
-			balanceValue := ScalarToArrayUint64(balanceBig)
 
-			nodeKvs = append(nodeKvs, NodeKV{
-				Key:   balanceKey,
-				Value: balanceValue,
-			})
-		}
-
-		if !isEmpty(acc.Nonce) {
-			nonceKey := utils.KeyEthAddrNonce(addr)
-			nonceBig := utils.ConvertHexToBigInt(acc.Nonce)
-			nonceValue := ScalarToArrayUint64(nonceBig)
-			nodeKvs = append(nodeKvs, NodeKV{
-				Key:   nonceKey,
-				Value: nonceValue,
-			})
-		}
-
-		if !isEmpty(acc.Code) {
-			keyContractCode := utils.KeyContractCode(addr)
-			keyContractLength := utils.KeyContractLength(addr)
-			bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
-			nodeKvs = append(nodeKvs, NodeKV{
-				Key:   keyContractCode,
-				Value: ScalarToArrayUint64(bi),
-			})
-			nodeKvs = append(nodeKvs, NodeKV{
-				Key:   keyContractLength,
-				Value: TinyScalarToArrayUint64(uint64(bytecodeLength)),
-			})
-		}
-
-		for k, v := range acc.Storage {
-			addrBig := utils.ConvertHexToBigInt(addr)
-			addrArr := ScalarToArrayUint64(addrBig)
-			storageBig := utils.ConvertHexToBigInt(v)
-			storageValue := ScalarToArrayUint64(storageBig)
-			storageKey := KeyContractStorageHack(addrArr, k)
-			nodeKvs = append(nodeKvs, NodeKV{
-				Key:   storageKey,
-				Value: storageValue,
-			})
-		}
+	// 获取所有地址并分片处理
+	addrs := make([]string, 0, len(alloc))
+	for addr := range alloc {
+		addrs = append(addrs, addr)
 	}
 
-	for i := range nodeKvs {
-		nodeKvs[i].path = nodeKvs[i].Key.GetPath()
+	numWorkers := runtime.NumCPU()
+	fmt.Println("numWorkers:", numWorkers)
+	chunkSize := (len(addrs) + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for i := 0; i < len(addrs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(addrs) {
+			end = len(addrs)
+		}
+
+		wg.Add(1)
+		go func(addrSlice []string) {
+			defer wg.Done()
+			localKvs := make([]NodeKV, 0, len(addrSlice)*2+2)
+
+			for _, addrStr := range addrSlice {
+				addr := libcommon.HexToAddress(addrStr).String()
+				acc := alloc[addrStr]
+
+				if !isEmpty(acc.Balance) {
+					balanceKey := utils.KeyEthAddrBalance(addr)
+					balanceBig := utils.ConvertHexToBigInt(acc.Balance)
+					balanceValue := utils.ScalarToArrayUint64(balanceBig)
+					localKvs = append(localKvs, NodeKV{
+						Key:   balanceKey,
+						Value: balanceValue,
+					})
+				}
+
+				if !isEmpty(acc.Nonce) {
+					nonceKey := utils.KeyEthAddrNonce(addr)
+					nonceBig := utils.ConvertHexToBigInt(acc.Nonce)
+					nonceValue := utils.ScalarToArrayUint64(nonceBig)
+					localKvs = append(localKvs, NodeKV{
+						Key:   nonceKey,
+						Value: nonceValue,
+					})
+				}
+
+				if !isEmpty(acc.Code) {
+					keyContractCode := utils.KeyContractCode(addr)
+					keyContractLength := utils.KeyContractLength(addr)
+					bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
+					localKvs = append(localKvs, NodeKV{
+						Key:   keyContractCode,
+						Value: utils.ScalarToArrayUint64(bi),
+					})
+					localKvs = append(localKvs, NodeKV{
+						Key:   keyContractLength,
+						Value: TinyScalarToArrayUint64(uint64(bytecodeLength)),
+					})
+				}
+
+				for k, v := range acc.Storage {
+					addrBig := utils.ConvertHexToBigInt(addr)
+					addrArr := utils.ScalarToArrayUint64(addrBig)
+					storageBig := utils.ConvertHexToBigInt(v)
+					storageValue := utils.ScalarToArrayUint64(storageBig)
+					storageKey := KeyContractStorageHack(addrArr, k)
+					localKvs = append(localKvs, NodeKV{
+						Key:   storageKey,
+						Value: storageValue,
+					})
+				}
+			}
+
+			// 计算路径和shortPath
+			for i := range localKvs {
+				localKvs[i].path = localKvs[i].Key.GetPath()
+				// 将path转换为shortPath
+				for j := 0; j < 256; j++ {
+					if localKvs[i].path[j] == 1 {
+						// 设置对应的bit为1
+						// j=0 应该对应最高位，所以是 63-(j%64)
+						blockIdx := j / 64      // 决定是哪个uint64
+						bitPos := 63 - (j % 64) // 在这个uint64中的位置，从高位开始
+						localKvs[i].shortPath[blockIdx] |= uint64(1) << uint64(bitPos)
+					}
+				}
+			}
+
+			// 合并结果
+			mu.Lock()
+			nodeKvs = append(nodeKvs, localKvs...)
+			mu.Unlock()
+		}(addrs[i:end])
 	}
+
+	wg.Wait()
 	fmt.Println("prepare elapsed:", time.Since(start1))
 
 	start11 := time.Now()
 	slices.SortFunc(nodeKvs, func(a, b NodeKV) int {
-		for k := 0; k < 256; k++ {
-			if a.path[k] < b.path[k] {
+		// 直接比较uint64数组
+		for i := 0; i < 4; i++ {
+			if a.shortPath[i] < b.shortPath[i] {
 				return -1
 			}
-			if a.path[k] > b.path[k] {
+			if a.shortPath[i] > b.shortPath[i] {
 				return 1
 			}
 		}
