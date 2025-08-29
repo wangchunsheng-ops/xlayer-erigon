@@ -14,10 +14,12 @@ import (
 	_ "net/http/pprof" //nolint:gosec
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutil"
@@ -89,9 +91,10 @@ var (
 	incremental     = flag.Bool("incremental", false, "use incremental  mode")
 	ignoreScalable  = flag.Bool("ignore-scalable", false, "ignore scalable account")
 	deleteScalable  = flag.Bool("delete-scalable", false, "delete scalable account")
+	fixScalable     = flag.Bool("fix-scalable", false, "fix scalable account")
 	debugPrint      = flag.Bool("debugPrint", false, "print debug info")
 
-	// For differential smt verification
+	// For X Layer, differential smt verification
 	preSmtData                = flag.String("pre-smt-data", "", "path to pre smt data")
 	preChainData              = flag.String("pre-chain-data", "", "path to pre chain data")
 	postSmtData               = flag.String("post-smt-data", "", "path to post smt data")
@@ -435,11 +438,15 @@ func BytesToPaddedHex(data []byte, length int) string {
 }
 
 func migrateGenesis(chaindata, input, output string) error {
+	start := time.Now()
+	defer func() {
+		fmt.Printf("total elapsed: %s\n", time.Since(start))
+	}()
 	db := mdbx.MustOpen(chaindata)
 	defer db.Close()
 
 	var genesisData map[string]interface{}
-	var allocData map[string]interface{}
+	var allocData map[string]AccInfo
 
 	if input == "" {
 		input = "genesis.json"
@@ -460,20 +467,27 @@ func migrateGenesis(chaindata, input, output string) error {
 
 	if _, ok := genesisData["alloc"]; !ok {
 		fmt.Println("No alloc field found in genesis stub.")
-		allocData = make(map[string]interface{})
+		allocData = make(map[string]AccInfo)
 	} else {
-		allocData = genesisData["alloc"].(map[string]interface{})
+		data, err := json.Marshal(genesisData["alloc"])
+		if err != nil {
+			fmt.Println("Error encoding alloc:", err)
+			return err
+		}
+		err = json.Unmarshal(data, &allocData)
+		if err != nil {
+			fmt.Println("Error decoding alloc:", err)
+			return err
+		}
 	}
 
-	var current map[string]interface{}
+	dumpAlloc := make(map[string]AccInfo)
 
-	var count uint64
 	var keys []string
 
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
 		return tx.ForEach(kv.PlainState, nil, func(k, v []byte) error {
 			if len(k) == 20 {
-				count++
 				keys = append(keys, common.Bytes2Hex(k))
 			}
 			return nil
@@ -482,7 +496,7 @@ func migrateGenesis(chaindata, input, output string) error {
 		return err
 	}
 
-	fmt.Printf("Keys count: %d\n", count)
+	fmt.Printf("Keys count: %d\n", len(keys))
 	sort.Strings(keys)
 	tx, txErr := db.BeginRo(context.Background())
 	if txErr != nil {
@@ -508,27 +522,7 @@ func migrateGenesis(chaindata, input, output string) error {
 			continue
 		}
 		log.Debug("acc_addr: %s\n", acc_hex)
-		if _, exists := allocData[acc_hex]; exists {
-			// Fixme: if xlayer account conflict with target node(such as op-geth), use which as new regenesis account?
-			a, err := plainStateReader.ReadAccountData(acc_addr)
-			if err != nil {
-				return err
-			}
 
-			if hex.EncodeToString(a.CodeHash.Bytes()) != ZERO_CODE_HASH {
-				fmt.Println("Adding existing contract: ", acc_hex)
-			} else {
-				fmt.Println("Adding existing account:", acc_hex)
-			}
-			continue
-		}
-		allocData[acc_hex] = make(map[string]interface{})
-		switch node := allocData[acc_hex].(type) {
-		case map[string]interface{}:
-			current = node
-		default:
-			panic("unhandled json type")
-		}
 		a, err := plainStateReader.ReadAccountData(acc_addr)
 		if err != nil {
 			return err
@@ -536,25 +530,30 @@ func migrateGenesis(chaindata, input, output string) error {
 			return fmt.Errorf("acc not found")
 		}
 
-		current["nonce"] = "0x" + strconv.FormatUint(a.Nonce, 16)
-		current["balance"] = a.Balance.Hex()
+		acc := AccInfo{}
 
-		log.Debug("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
-		if acc_addr == state.ADDRESS_SCALABLE_L2 {
-			fmt.Printf("SCALABLE incarnation: %v\n", a.Incarnation)
+		if !a.Balance.IsZero() {
+			acc.Balance = a.Balance.Hex()
 		}
 
-		// otherwise, get code and storage
-		code, err := tx.GetOne(kv.Code, a.CodeHash[:])
-		if err != nil {
-			return err
+		if a.Nonce != 0 {
+			acc.Nonce = "0x" + strconv.FormatUint(a.Nonce, 16)
 		}
-		current["code"] = hexutil.Encode(code)
-		log.Debug("acc: %s => %s\n", acc_addr, hexutil.Encode(code))
+
+		if a.Incarnation != 1 {
+			log.Info("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
+		}
+
+		if a.CodeHash.Hex() != "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" {
+			code, err := tx.GetOne(kv.Code, a.CodeHash[:])
+			if err != nil {
+				return err
+			}
+			acc.Code = hexutil.Encode(code)
+			log.Debug("acc: %s => %s\n", acc_addr, hexutil.Encode(code))
+		}
+
 		acc_bytes := common.FromHex(acc_hex)
-		first_storage := false
-		var last_incarnation uint64 = 1<<64 - 1
-		numIncarnations := 0
 		for k, v, e := c.Seek(acc_bytes); k != nil; k, v, e = c.Next() {
 			if e != nil {
 				return e
@@ -564,38 +563,60 @@ func migrateGenesis(chaindata, input, output string) error {
 			}
 			// todo: make sure if exist same address have diff Incarnation? seem no
 			if len(k) > 28 {
-				incarnation := binary.BigEndian.Uint64(k[20:28])
-				if incarnation != last_incarnation {
-					last_incarnation = incarnation
-					numIncarnations += 1
-					if numIncarnations > 1 {
-						panic(fmt.Sprintf("acct with multiple incarnations: %s, num of incarnations: %d", acc_hex, numIncarnations))
-					}
+				if acc.Storage == nil {
+					acc.Storage = make(map[string]string)
 				}
-
-				if !first_storage {
-					if _, exists := current["storage"]; !exists {
-						current["storage"] = make(map[string]interface{})
-					}
-
-					switch node := current["storage"].(type) {
-					case map[string]interface{}:
-						current = node
-					default:
-						panic("unhandled json type")
-					}
-					first_storage = true
-				}
-				current[hexutil.Encode(k[28:])] = BytesToPaddedHex(v, 64)
+				acc.Storage[hexutil.Encode(k[28:])] = BytesToPaddedHex(v, 64)
 				log.Debug("%x slot => %x\n", k[28:], v)
 			}
 		}
-		if !first_storage {
-			current["storage"] = make(map[string]interface{})
+
+		dumpAlloc[acc_hex] = acc
+	}
+
+	for addr, alloc := range allocData {
+		if alloc.Nonce == "0x" || alloc.Nonce == "0x0" {
+			alloc.Nonce = ""
+		}
+		if alloc.Balance == "0x" || alloc.Balance == "0x0" {
+			alloc.Balance = ""
+		}
+		if alloc.Code == "0x" || alloc.Code == "0x0" {
+			alloc.Code = ""
+		}
+		if dump, exists := dumpAlloc[addr]; exists {
+			isContract := len(alloc.Code) > 2 || len(dump.Code) > 2
+			if isContract {
+				fmt.Printf("contract address conflict: %s\n", addr)
+			} else {
+				fmt.Printf("EOA address conflict: %s\n", addr)
+			}
+			if alloc.Balance != dump.Balance {
+				fmt.Printf("		balance conflict, %s ==> %s\n", dump.Balance, alloc.Balance)
+			}
+			if alloc.Nonce != dump.Nonce {
+				fmt.Printf("		nonce conflict, %s ==> %s\n", dump.Nonce, alloc.Nonce)
+			}
+			if alloc.Code != dump.Code {
+				fmt.Printf("		code conflict, %s ==> %s\n", dump.Code, alloc.Code)
+				if len(alloc.Storage)+len(dump.Storage) > 0 {
+					fmt.Printf("		has storage !!!!!!!!!!\n")
+				}
+			}
+			if !compareStorage(alloc.Storage, dump.Storage) {
+				fmt.Printf("		storage conflict, %s ==> %s\n", traversalMapByOrder(dump.Storage), traversalMapByOrder(alloc.Storage))
+			}
+
+			// if dump has no code, use code from op stack
+			if dump.Code == "" && len(alloc.Code) > 2 {
+				dump.Code = alloc.Code
+			}
+		} else {
+			dumpAlloc[addr] = alloc
 		}
 	}
 
-	genesisData["alloc"] = allocData
+	genesisData["alloc"] = dumpAlloc
 
 	updatedData, err := json.MarshalIndent(genesisData, "", "  ")
 	if err != nil {
@@ -613,6 +634,35 @@ func migrateGenesis(chaindata, input, output string) error {
 		return err
 	}
 	return nil
+}
+
+func traversalMapByOrder(m map[string]string) string {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var kvs []string
+	for _, k := range keys {
+		v := m[k]
+		kvs = append(kvs, fmt.Sprintf("%s:%s", k, v))
+	}
+	return strings.Join(kvs, ", ")
+}
+
+func compareStorage(storage1, storage2 map[string]string) bool {
+	for k1, v1 := range storage1 {
+		if v2, ok := storage2[k1]; !ok || v1 != v2 {
+			return false
+		}
+	}
+
+	for k2, v2 := range storage2 {
+		if v1, ok := storage1[k2]; !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 func printBucket(chaindata, bucket string) {
@@ -1656,10 +1706,10 @@ func dumpState(chaindata string) error {
 }
 
 type AccInfo struct {
-	Balance string            `json:"balance"`
-	Nonce   string            `json:"nonce"`
-	Code    string            `json:"code"`
-	Storage map[string]string `json:"storage"`
+	Balance string            `json:"balance,omitempty"`
+	Nonce   string            `json:"nonce,omitempty"`
+	Code    string            `json:"code,omitempty"`
+	Storage map[string]string `json:"storage,omitempty"`
 }
 
 // const TableSmt = "HermezSmt"
@@ -1691,6 +1741,107 @@ func createSMTTables(db kv.RwDB, tx kv.RwTx) error {
 		fmt.Printf("Created bucket: %s\n", bucketName)
 	}
 
+	return nil
+}
+
+func debugScalable(chaindata, input string) error {
+	var jsonData map[string]map[string]AccInfo
+	if input == "" {
+		input = "genesis.json"
+	}
+	fmt.Printf("input: %s\n", input)
+	fileData, err := os.ReadFile(input)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error reading file:", err)
+			return err
+		}
+	} else {
+		if err := json.Unmarshal(fileData, &jsonData); err != nil {
+			fmt.Println("Error decoding JSON:", err)
+			return err
+		}
+	}
+
+	ctx := context.Background()
+	db := mdbx.MustOpen(chaindata)
+	defer db.Close()
+	tx, err := db.BeginRw(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	eridb := db2.NewEriDb(nil, tx)
+	smtOrigin := smt.NewSMT(eridb, false)
+
+	address := state.ADDRESS_SCALABLE_L2
+
+	fmt.Println("total storage:", len(jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage))
+
+	start := time.Now()
+	var index int
+	for k, v := range jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage {
+		fmt.Println("index:", index)
+		keyHash := libcommon.HexToHash(k)
+		valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
+		if err != nil {
+			fmt.Printf("Error reading scalable account storage: %s\n", err)
+			return err
+		}
+		valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
+		if valInSmtHex != v {
+			fmt.Printf("key: %s, valInSmt: %s ===> valInGenesise: %s \n", k, valInSmtHex, v)
+		}
+		index++
+	}
+
+	fmt.Println("total elapsed:", time.Since(start))
+
+	return nil
+}
+
+func checkStateRootFast(chaindata, smtdata, input string, fixScalable bool) error {
+
+	ctx := context.Background()
+	db := mdbx.MustOpen(chaindata)
+	defer db.Close()
+	tx, err := db.BeginRw(ctx)
+	if err != nil {
+		panic(err)
+	}
+	defer tx.Rollback()
+	var txsmt kv.RwTx = nil
+	if smtdata != "" {
+		fmt.Printf("Using split DB: %s\n", smtdata)
+		dbsmt := mdbx.MustOpen(*pathSmtDb)
+		defer dbsmt.Close()
+		txsmt, err = dbsmt.BeginRw(ctx)
+		if err != nil {
+			panic(err)
+		}
+	}
+	if txsmt != nil {
+		defer txsmt.Rollback()
+	}
+
+	eridb := db2.NewEriDb(txsmt, tx)
+	smtOrigin := smt.NewSMT(eridb, false)
+
+	smtBatchRootHashOrigin := smtOrigin.LastRoot()
+	fmt.Printf("*** smtBatchRootHashOrigin: %x\n", smtBatchRootHashOrigin)
+
+	root, err := calcSmtRoot(input, fixScalable)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("*** smtBatchRootHashRebuild: %x\n", root)
+
+	if smtBatchRootHashOrigin.String() == root.String() {
+		fmt.Println("check passed !!")
+	} else {
+		fmt.Println("check failed...")
+	}
 	return nil
 }
 
@@ -1734,6 +1885,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			panic(err)
 		}
 	}
+
 	eridb := db2.NewEriDb(txsmt, tx)
 	smtOrigin := smt.NewSMT(eridb, false)
 
@@ -1748,19 +1900,27 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		}
 		address := libcommon.BytesToAddress(accBytes)
 		acc := accounts.NewAccount()
-		balance, err := uint256.FromHex(value.Balance)
-		if err != nil {
-			panic(fmt.Sprintf("acc decoding error for acct: %s, err: %v", address, err))
+
+		if value.Balance != "" {
+			err := acc.Balance.SetFromHex(value.Balance)
+			if err != nil {
+				fmt.Println("balance decoding error:", err)
+				panic(fmt.Sprintf("acc decoding error for acct: %s, err: %v", address, err))
+			}
 		}
-		acc.Balance = *balance
-		nonce, err := hexutil.DecodeUint64(value.Nonce)
-		if err != nil {
-			panic("nonce decoding error")
+
+		if value.Nonce != "" {
+			nonce, err := hexutil.DecodeUint64(value.Nonce)
+			if err != nil {
+				fmt.Println("nonce decoding error", err)
+				panic("nonce decoding error")
+			}
+			acc.Nonce = nonce
 		}
-		acc.Nonce = nonce
+
 		accChanges[address] = &acc
 
-		if value.Code != "0x" {
+		if value.Code != "" && value.Code != "0x" {
 			codeChanges[address] = value.Code
 		}
 		if *ignoreScalable && address == state.ADDRESS_SCALABLE_L2 {
@@ -1790,6 +1950,11 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			fmt.Printf("Finish override scalable storages with original storage (%d valuess overridden)\n", numValsOverridden)
 			continue
 		}
+
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"] = "0x0000000000000000000000000000000000000000000000000000000068ad8a02"
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"] = "0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb"
+		//jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"] = "0x000000000000000000000000000000000000000000000000000000000083223c"
+
 		if value.Storage != nil {
 			storageChanges[address] = make(map[string]string)
 			/// Fixme: use maps.Clone, which is more efficient
@@ -1863,7 +2028,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			smtIncremental := smt.NewSMT(db2.NewEriDb(txn, tx), false)
 		*/
 
-		fmt.Println("Begin SetAccountStorage")
+		fmt.Println("Begin SetAccountStorage:", len(accChanges))
 		bar := progressbar.NewOptions(len(accChanges), progressbar.OptionSetPredictTime(true))
 		for addr, acc := range accChanges {
 			if err := smtIncremental.SetAccountStorage(addr, acc); err != nil {
@@ -1874,7 +2039,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		bar.Finish()
 		fmt.Println()
 
-		fmt.Println("Begin SetContractBytecode")
+		fmt.Println("Begin SetContractBytecode", len(codeChanges))
 		bar = progressbar.NewOptions(len(codeChanges), progressbar.OptionSetPredictTime(true))
 		for addr, code := range codeChanges {
 			if err := smtIncremental.SetContractBytecode(addr.String(), code); err != nil {
@@ -1885,11 +2050,12 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		bar.Finish()
 		fmt.Println()
 
-		fmt.Println("Begin SetContractStorage")
 		totalStorage := 0
 		for _, storage := range storageChanges {
 			totalStorage += len(storage)
 		}
+		fmt.Println("Begin SetContractStorage", totalStorage)
+
 		bar = progressbar.NewOptions(totalStorage, progressbar.OptionSetPredictTime(true))
 		for addr, storage := range storageChanges {
 			if _, err := smtIncremental.SetContractStorage(addr.String(), storage, nil); err != nil {
@@ -1956,11 +2122,411 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 	}
 
 	tx.Rollback()
-	if txsmt != nil {
+	if txsmt != nil && txsmt != tx {
 		txsmt.Rollback()
 	}
 
 	return nil
+}
+
+func TinyScalarToArrayUint64(scalar uint64) [8]uint64 {
+	var result [8]uint64
+
+	result[0] = scalar & 0xFFFFFFFF
+	result[1] = (scalar >> 32) & 0xFFFFFFFF
+
+	return result
+}
+
+type NodeKV struct {
+	Key       utils.NodeKey
+	Value     [8]uint64
+	leafHash  [4]uint64
+	level     int // [0, 255]
+	path      []int
+	shortPath [4]uint64 // Store 256 bits using 4 uint64s
+}
+
+func calculateLevels(nodeKvs []*NodeKV, startLevel int) {
+	if len(nodeKvs) <= 1 || startLevel > 255 {
+		return
+	}
+
+	// Find the position that split the tree into two subtrees.
+	splitIndex := sort.Search(len(nodeKvs), func(i int) bool {
+		return nodeKvs[i].Key.GetPath()[startLevel] == 1
+	})
+
+	if splitIndex == 0 {
+		// All nodes belong to the right subtree
+		calculateLevels(nodeKvs, startLevel+1)
+	} else if splitIndex == len(nodeKvs) {
+		// All nodes belong to the left subtree
+		calculateLevels(nodeKvs, startLevel+1)
+	} else {
+		// Both left subtree and right subtree have node(s)
+		for i := range nodeKvs {
+			nodeKvs[i].level = startLevel + 1
+		}
+
+		// Enable concurrent processing only when data size is large enough
+		if len(nodeKvs) > 10000 {
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Process left subtree concurrently
+			go func() {
+				defer wg.Done()
+				calculateLevels(nodeKvs[:splitIndex], startLevel+1)
+			}()
+
+			// Process right subtree concurrently
+			go func() {
+				defer wg.Done()
+				calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+			}()
+
+			wg.Wait()
+		} else {
+			// Process sequentially when data size is small
+			calculateLevels(nodeKvs[:splitIndex], startLevel+1)
+			calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+		}
+	}
+}
+
+func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey {
+	storageKeyBig := utils.ConvertHexToBigInt(storageKey)
+	storageKeyArr := utils.ScalarToArrayUint64(storageKeyBig)
+	hk0 := utils.HashByPointers(&storageKeyArr, &utils.BranchCapacity)
+	var key1 = [8]uint64{ethaddr[0], ethaddr[1], ethaddr[2], ethaddr[3], ethaddr[4], ethaddr[5], uint64(utils.SC_STORAGE), uint64(0)}
+	return *utils.HashByPointers(&key1, hk0)
+}
+
+func calcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
+	start00 := time.Now()
+	defer func() {
+		fmt.Println("total elapsed:", time.Since(start00))
+	}()
+
+	var jsonData map[string]map[string]AccInfo
+	if input == "" {
+		input = "genesis.json"
+	}
+	fmt.Printf("input: %s\n", input)
+	fileData, err := os.ReadFile(input)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error reading file:", err)
+			return nil, err
+		}
+	} else {
+		if err := json.Unmarshal(fileData, &jsonData); err != nil {
+			fmt.Println("Error decoding JSON:", err)
+			return nil, err
+		}
+	}
+
+	alloc := jsonData["alloc"]
+
+	if _, ok := jsonData["alloc"]; ok && fixScalable {
+		if _, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"]; ok {
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000002", v, " ===> 0x0000000000000000000000000000000000000000000000000000000068ad8a02")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"] = "0x0000000000000000000000000000000000000000000000000000000068ad8a02"
+			}
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000003", v, " ===> 0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"] = "0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb"
+			}
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000000", v, " ===> 0x000000000000000000000000000000000000000000000000000000000083223c")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"] = "0x000000000000000000000000000000000000000000000000000000000083223c"
+			}
+		}
+	}
+
+	nodeKvs := make([]*NodeKV, 0)
+
+	start1 := time.Now()
+
+	// Get all addresses and process them in chunks
+	addrs := make([]string, 0, len(alloc))
+	for addr := range alloc {
+		addrs = append(addrs, addr)
+	}
+
+	numWorkers := runtime.NumCPU()
+	fmt.Println("numWorkers:", numWorkers)
+	chunkSize := (len(addrs) + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for i := 0; i < len(addrs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(addrs) {
+			end = len(addrs)
+		}
+
+		wg.Add(1)
+		go func(addrSlice []string) {
+			defer wg.Done()
+			localKvs := make([]*NodeKV, 0, len(addrSlice)*2+2)
+
+			for _, addrStr := range addrSlice {
+				addr := libcommon.HexToAddress(addrStr).String()
+				acc := alloc[addrStr]
+
+				if !isEmpty(acc.Balance) {
+					balanceKey := utils.KeyEthAddrBalance(addr)
+					balanceBig := utils.ConvertHexToBigInt(acc.Balance)
+					balanceValue := utils.ScalarToArrayUint64(balanceBig)
+					localKvs = append(localKvs, &NodeKV{
+						Key:   balanceKey,
+						Value: balanceValue,
+					})
+				}
+
+				if !isEmpty(acc.Nonce) {
+					nonceKey := utils.KeyEthAddrNonce(addr)
+					nonceBig := utils.ConvertHexToBigInt(acc.Nonce)
+					nonceValue := utils.ScalarToArrayUint64(nonceBig)
+					localKvs = append(localKvs, &NodeKV{
+						Key:   nonceKey,
+						Value: nonceValue,
+					})
+				}
+
+				if !isEmpty(acc.Code) {
+					keyContractCode := utils.KeyContractCode(addr)
+					keyContractLength := utils.KeyContractLength(addr)
+					bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
+					localKvs = append(localKvs, &NodeKV{
+						Key:   keyContractCode,
+						Value: utils.ScalarToArrayUint64(bi),
+					})
+					localKvs = append(localKvs, &NodeKV{
+						Key:   keyContractLength,
+						Value: TinyScalarToArrayUint64(uint64(bytecodeLength)),
+					})
+				}
+
+				if len(acc.Storage) > 100000 {
+					// Convert storage to slice for parallel processing
+					storageKeys := make([]string, 0, len(acc.Storage))
+					for k := range acc.Storage {
+						storageKeys = append(storageKeys, k)
+					}
+
+					// Calculate chunk size for each worker
+					numStorageWorkers := runtime.NumCPU()
+					storageChunkSize := (len(storageKeys) + numStorageWorkers - 1) / numStorageWorkers
+
+					var storageWg sync.WaitGroup
+					var storageMu sync.Mutex
+					addrBig := utils.ConvertHexToBigInt(addr)
+					addrArr := utils.ScalarToArrayUint64(addrBig)
+
+					// Process storage concurrently
+					for i := 0; i < len(storageKeys); i += storageChunkSize {
+						end := i + storageChunkSize
+						if end > len(storageKeys) {
+							end = len(storageKeys)
+						}
+
+						storageWg.Add(1)
+						go func(keys []string) {
+							defer storageWg.Done()
+							localStorageKvs := make([]*NodeKV, 0, len(keys))
+
+							for _, k := range keys {
+								v := acc.Storage[k]
+								storageBig := utils.ConvertHexToBigInt(v)
+								storageValue := utils.ScalarToArrayUint64(storageBig)
+								storageKey := KeyContractStorageHack(addrArr, k)
+								localStorageKvs = append(localStorageKvs, &NodeKV{
+									Key:   storageKey,
+									Value: storageValue,
+								})
+							}
+
+							storageMu.Lock()
+							localKvs = append(localKvs, localStorageKvs...)
+							storageMu.Unlock()
+						}(storageKeys[i:end])
+					}
+
+					storageWg.Wait()
+				} else {
+					// Process storage sequentially when size is small
+					addrBig := utils.ConvertHexToBigInt(addr)
+					addrArr := utils.ScalarToArrayUint64(addrBig)
+					for k, v := range acc.Storage {
+						storageBig := utils.ConvertHexToBigInt(v)
+						storageValue := utils.ScalarToArrayUint64(storageBig)
+						storageKey := KeyContractStorageHack(addrArr, k)
+						localKvs = append(localKvs, &NodeKV{
+							Key:   storageKey,
+							Value: storageValue,
+						})
+					}
+				}
+			}
+
+			// Calculate path and shortPath
+			for i := range localKvs {
+				localKvs[i].path = localKvs[i].Key.GetPath()
+				// Convert path to shortPath
+				for j := 0; j < 256; j++ {
+					if localKvs[i].path[j] == 1 {
+						// Set corresponding bit to 1
+						// j=0 should map to highest bit, so use 63-(j%64)
+						blockIdx := j / 64      // Determine which uint64
+						bitPos := 63 - (j % 64) // Position in this uint64, starting from highest bit
+						localKvs[i].shortPath[blockIdx] |= uint64(1) << uint64(bitPos)
+					}
+				}
+			}
+
+			// Merge results
+			mu.Lock()
+			nodeKvs = append(nodeKvs, localKvs...)
+			mu.Unlock()
+		}(addrs[i:end])
+	}
+
+	wg.Wait()
+	fmt.Println("prepare elapsed:", time.Since(start1))
+
+	start11 := time.Now()
+	slices.SortFunc(nodeKvs, func(a, b *NodeKV) int {
+		// Directly compare uint64 arrays
+		for i := 0; i < 4; i++ {
+			if a.shortPath[i] < b.shortPath[i] {
+				return -1
+			}
+			if a.shortPath[i] > b.shortPath[i] {
+				return 1
+			}
+		}
+		return 0
+	})
+	fmt.Println("sorting nodes elapsed:", time.Since(start11))
+
+	start2 := time.Now()
+	calculateLevels(nodeKvs, 0)
+	fmt.Println("calculate level elapsed:", time.Since(start2))
+
+	start3 := time.Now()
+	// 2. Calculate leaf node hashes concurrently
+	chunkSize = (len(nodeKvs) + numWorkers - 1) / numWorkers
+
+	for i := 0; i < len(nodeKvs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(nodeKvs) {
+			end = len(nodeKvs)
+		}
+
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				// value hash
+				valueHash := utils.HashByPointers(
+					&nodeKvs[i].Value,
+					&utils.BranchCapacity,
+				)
+
+				// leaf hash
+				remainingKey := utils.RemoveKeyBits(nodeKvs[i].Key, nodeKvs[i].level)
+				nodeKvs[i].leafHash = *utils.HashByPointers(
+					&[8]uint64{
+						remainingKey[0], remainingKey[1], remainingKey[2], remainingKey[3],
+						valueHash[0], valueHash[1], valueHash[2], valueHash[3],
+					},
+					&utils.LeafCapacity,
+				)
+			}
+		}(i, end)
+	}
+	wg.Wait()
+	fmt.Println("calculate leaf hash elapsed:", time.Since(start3))
+
+	start4 := time.Now()
+	root := utils.NodeKey(calculateRoot(nodeKvs, 0, len(nodeKvs), 0))
+	fmt.Println("calculate root hash elapsed:", time.Since(start4))
+
+	return root.ToBigInt(), nil
+}
+
+func CalcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
+	root, err := calcSmtRoot(input, fixScalable)
+	if err != nil {
+		fmt.Println("calc smt root error:", err)
+		return nil, err
+	}
+
+	fmt.Printf("*** smtBatchRootHashRebuild: %x\n", root)
+	return root, nil
+}
+
+func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
+	if start >= end {
+		return [4]uint64{0, 0, 0, 0} // Return zero hash for empty node
+	}
+
+	if start+1 == end {
+		return nodeKVs[start].leafHash // Return leaf hash for single node
+	}
+
+	// Find the split point
+	splitIndex := sort.Search(end-start, func(i int) bool {
+		return nodeKVs[start+i].path[level] == 1
+	}) + start
+
+	// Calculate hashes for left and right subtrees
+	var leftHash, rightHash [4]uint64
+	if end-start > 10000 {
+		var wg sync.WaitGroup
+
+		if splitIndex > start {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
+			}()
+		}
+
+		if splitIndex < end {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+			}()
+		}
+
+		wg.Wait()
+	} else {
+		if splitIndex > start {
+			leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
+		}
+		if splitIndex < end {
+			rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+		}
+	}
+
+	// Calculate hash for current node
+	return *utils.HashByPointers(
+		&[8]uint64{
+			leftHash[0], leftHash[1], leftHash[2], leftHash[3],
+			rightHash[0], rightHash[1], rightHash[2], rightHash[3],
+		},
+		&utils.BranchCapacity,
+	)
+}
+
+func isEmpty(s string) bool {
+	return s == "" || s == "0x0"
 }
 
 func getSmtroot(chaindata string) error {
@@ -2137,8 +2703,18 @@ func main() {
 		} else {
 			err = checkStateRoot(*chaindata, "", *input, *incremental, *debugPrint)
 		}
+	case "checkStateRootFast":
+		if *standaloneSmtDb {
+			err = checkStateRootFast(*chaindata, *pathSmtDb, *input, *fixScalable)
+		} else {
+			err = checkStateRootFast(*chaindata, "", *input, *fixScalable)
+		}
+	case "debugScalable":
+		err = debugScalable(*chaindata, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
+	case "calcSmtRoot":
+		_, err = CalcSmtRoot(*input, *fixScalable)
 	default:
 		fmt.Printf("Unknown action: %s\n", *action)
 		return

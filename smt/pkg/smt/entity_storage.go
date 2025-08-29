@@ -183,7 +183,6 @@ func (s *SMT) SetContractStorage(ethAddr string, storage map[string]string, prog
 		}
 
 	} else {
-		fmt.Println("before calcHash")
 		for _, k := range storageKeys {
 			v := storage[k]
 			if v == "" {
@@ -199,16 +198,11 @@ func (s *SMT) SetContractStorage(ethAddr string, storage map[string]string, prog
 		}
 	}
 
-	fmt.Println("begin set storage")
 	auxRes, err := s.InsertStorage(ethAddr, &storage, &chm, &vhm, progressChan)
-	fmt.Println("end set storage")
 	if err != nil {
-		fmt.Println("insert storage error:", err)
 		return nil, err
 	}
-	fmt.Println("before toBigInt")
 	tmp := auxRes.NewRootScalar.ToBigInt()
-	fmt.Println("after toBigInt")
 	return tmp, nil
 }
 
@@ -412,11 +406,7 @@ func convertBytecodeToBigInt(bytecode string) (*big.Int, int, error) {
 	bi := utils.HashContractBytecodeBigInt(bytecode)
 	parsedBytecode := strings.TrimPrefix(bytecode, "0x")
 
-	if len(parsedBytecode)%2 != 0 {
-		parsedBytecode = "0" + parsedBytecode
-	}
-
-	bytecodeLength := len(parsedBytecode) / 2
+	bytecodeLength := (len(parsedBytecode) + 1) / 2
 
 	if len(bytecode) == 0 {
 		bytecodeLength = 0

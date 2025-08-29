@@ -697,17 +697,32 @@ func KeyContractLength(ethAddr string) NodeKey {
 	return Key(ethAddr, SC_LENGTH)
 }
 
+// key1Capacity, _ := StringToH4(HASH_POSEIDON_ALL_ZEROES)
+var key1Capacity = [4]uint64{4330397376401421145, 14124799381142128323, 8742572140681234676, 14345658006221440202}
+
 func Key(ethAddr string, c int) NodeKey {
 	a := ConvertHexToBigInt(ethAddr)
-	add := ScalarToArrayBig(a)
+	add := ScalarToArrayUint64(a)
 
-	key1 := NodeValue8{add[0], add[1], add[2], add[3], add[4], add[5], big.NewInt(int64(c)), big.NewInt(0)}
-	key1Capacity, err := StringToH4(HASH_POSEIDON_ALL_ZEROES)
-	if err != nil {
-		return NodeKey{}
+	key1 := [8]uint64{add[0], add[1], add[2], add[3], add[4], add[5], uint64(c), uint64(0)}
+
+	return Hash(key1, key1Capacity)
+}
+
+func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
+	var result [8]uint64
+
+	if scalar == nil || scalar.Sign() == 0 {
+		return result
 	}
 
-	return Hash(key1.ToUintArray(), key1Capacity)
+	tmp := new(big.Int).Set(scalar)
+	for i := 0; i < 8; i++ {
+		result[i] = tmp.Uint64() & 0xFFFFFFFF
+		tmp.Rsh(tmp, 32)
+	}
+
+	return result
 }
 
 func KeyBig(k *big.Int, c int) (*NodeKey, error) {

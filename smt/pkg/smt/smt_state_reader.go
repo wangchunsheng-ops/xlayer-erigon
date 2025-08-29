@@ -184,6 +184,8 @@ func (s *SMT) getValueInBytes(nodeKey utils.NodeKey) ([]byte, error) {
 		return nil, err
 	}
 
+	return s.GetExact(context.Background(), root, keyPathBytes)
+
 	err = s.Traverse(context.Background(), root, action)
 	if err != nil {
 		return nil, err
