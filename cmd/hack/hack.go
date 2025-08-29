@@ -1744,7 +1744,7 @@ func createSMTTables(db kv.RwDB, tx kv.RwTx) error {
 	return nil
 }
 
-func debugScalable(chaindata, input string) error {
+func debugScalable(chaindata, smtdata, input string) error {
 	var jsonData map[string]map[string]AccInfo
 	if input == "" {
 		input = "genesis.json"
@@ -1771,13 +1771,37 @@ func debugScalable(chaindata, input string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var txsmt kv.RwTx = nil
+	if smtdata != "" {
+		fmt.Printf("Using split DB: %s\n", smtdata)
+		dbsmt := mdbx.MustOpen(*pathSmtDb)
+		defer dbsmt.Close()
+		txsmt, err = dbsmt.BeginRw(ctx)
+		if err != nil {
+			panic(err)
+		}
+		defer txsmt.Rollback()
+	}
 
-	eridb := db2.NewEriDb(nil, tx)
+	eridb := db2.NewEriDb(txsmt, tx)
 	smtOrigin := smt.NewSMT(eridb, false)
 
 	address := state.ADDRESS_SCALABLE_L2
 
 	fmt.Println("total storage:", len(jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage))
+
+	for _, k := range []string{"0x0000000000000000000000000000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000000000000000000000000000003"} {
+		keyHash := libcommon.HexToHash(k)
+		valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
+		if err != nil {
+			fmt.Printf("Error reading scalable account storage: %s\n", err)
+			return err
+		}
+		valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
+		fmt.Println("key:", k)
+		fmt.Println("  	dump:", jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage[k])
+		fmt.Println("  	smt:", valInSmtHex)
+	}
 
 	start := time.Now()
 	var index int
@@ -2554,6 +2578,8 @@ func main() {
 	// For X Layer, split db
 	kv.InitStandaloneSMT(*standaloneSmtDb)
 
+	start := time.Now()
+
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -2710,7 +2736,7 @@ func main() {
 			err = checkStateRootFast(*chaindata, "", *input, *fixScalable)
 		}
 	case "debugScalable":
-		err = debugScalable(*chaindata, *input)
+		err = debugScalable(*chaindata, *pathSmtDb, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
 	case "calcSmtRoot":
@@ -2719,6 +2745,8 @@ func main() {
 		fmt.Printf("Unknown action: %s\n", *action)
 		return
 	}
+
+	fmt.Println("total elapsed:", time.Since(start))
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
