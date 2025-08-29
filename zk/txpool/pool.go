@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -50,6 +51,8 @@ import (
 	"github.com/ledgerwatch/erigon-lib/common/assert"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/erigon-lib/common/fixedgas"
+	common_util "github.com/ledgerwatch/erigon/common"
+
 	emath "github.com/ledgerwatch/erigon-lib/common/math"
 	"github.com/ledgerwatch/erigon-lib/common/u256"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces"
@@ -94,6 +97,9 @@ type Pool interface {
 	GetRlp(tx kv.Tx, hash []byte) ([]byte, error)
 
 	AddNewGoodPeer(peerID types.PeerID)
+
+	// RemoveTx is the admin tx, used to remove transactions
+	RemoveTx(hash common.Hash) error
 }
 
 var _ Pool = (*TxPool)(nil) // compile-time interface check
@@ -155,7 +161,8 @@ const (
 
 	// For X Layer
 	ReceiverDisallowedReceiveTx DiscardReason = 127 // receiver is not allowed to receive transactions
-	NoWhiteListedSender         DiscardReason = 128 // the transaction is sent by a non-whitelisted account
+	NoWhiteListedSender         DiscardReason = 128 // the transaction is sent by a non-whitelisted
+	SequencerAdminRemoval       DiscardReason = 129 // removed by the seq admin
 )
 
 func (r DiscardReason) String() string {
@@ -701,12 +708,39 @@ func (p *TxPool) IdHashKnown(tx kv.Tx, hash []byte) (bool, error) {
 	}
 	return tx.Has(kv.PoolTransaction, hash)
 }
+
 func (p *TxPool) IsLocal(idHash []byte) bool {
 	// For X Layer, optimize tx pool
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 	return p.isLocalLRU.Contains(string(idHash))
 }
+
+func (p *TxPool) RemoveTx(hash common.Hash) error {
+	start := time.Now()
+	//try to find in the memory pending pools
+	txMeta := p.findPendingTxByHash(hash)
+	if txMeta == nil {
+		log.Info("Admin RemoveTx failed for the tx not found", "hash", hash)
+		return errors.New("tx not found")
+	}
+	// update the related recorders
+	p.safeDiscardLocked(txMeta, SequencerAdminRemoval)
+	// remove the transaction from the pending pool
+	p.pending.Remove(txMeta)
+	log.Info("Admin RemoveTx success", "hash", hash, "timecost", common_util.PrettyDuration(time.Since(start)))
+	return nil
+}
+
+func (p *TxPool) findPendingTxByHash(hash common.Hash) *metaTx {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+	if metaTx, ok := p.byHash[string(hash.Bytes())]; ok {
+		return metaTx
+	}
+	return nil
+}
+
 func (p *TxPool) AddNewGoodPeer(peerID types.PeerID) { p.recentlyConnectedPeers.AddPeer(peerID) }
 func (p *TxPool) Started() bool                      { return p.started.Load() }
 
@@ -1333,6 +1367,21 @@ func (p *TxPool) discardLocked(mt *metaTx, reason DiscardReason) {
 	p.deletedTxs = append(p.deletedTxs, mt)
 	p.all.delete(mt)
 	p.discardReasonsLRU.Add(string(mt.Tx.IDHash[:]), reason)
+}
+
+// batchDiscardLocked remove the txs list when obtain the write-lock, to decrease the lock contention
+func (p *TxPool) batchDiscardLocked(mts []*metaTx, reason DiscardReason) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	for _, mt := range mts {
+		p.discardLocked(mt, reason)
+	}
+}
+
+func (p *TxPool) safeDiscardLocked(mt *metaTx, reason DiscardReason) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.discardLocked(mt, reason)
 }
 
 func (p *TxPool) NonceFromAddress(addr [20]byte) (nonce uint64, inPool bool) {
@@ -2425,6 +2474,15 @@ func (p *PendingPool) Remove(i *metaTx) {
 	defer p.mtx.Unlock()
 
 	p.RemoveNoLock(i)
+}
+
+// BatchRemove remove the txs list when get the write-lock, to decrease the lock contention
+func (p *PendingPool) BatchRemove(txs []*metaTx) {
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+	for _, mt := range txs {
+		p.RemoveNoLock(mt)
+	}
 }
 
 func (p *PendingPool) Add(i *metaTx) {
