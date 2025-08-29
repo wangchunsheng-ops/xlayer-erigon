@@ -2605,6 +2605,8 @@ func main() {
 	// For X Layer, split db
 	kv.InitStandaloneSMT(*standaloneSmtDb)
 
+	start := time.Now()
+
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -2766,6 +2768,8 @@ func main() {
 		fmt.Printf("Unknown action: %s\n", *action)
 		return
 	}
+
+	fmt.Println("total elapsed:", time.Since(start))
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
