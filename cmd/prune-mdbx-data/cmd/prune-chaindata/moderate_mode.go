@@ -10,7 +10,7 @@ import (
 )
 
 // executeBatchOperationsWithCommit executes batch operations with guaranteed commit for Moderate mode
-func executeBatchOperationsWithCommit(dbPath string, keepRecentBatches uint64, log logv3.Logger, ctx context.Context) (int, int) {
+func executeBatchOperationsWithCommit(dbPath string, keepRecentBatches uint64, genesisHeight uint64, log logv3.Logger, ctx context.Context) (int, int) {
 	fmt.Printf("\n=== Phase 1: Batch Operations ===\n")
 
 	// Open database for batch operations
@@ -44,7 +44,7 @@ func executeBatchOperationsWithCommit(dbPath string, keepRecentBatches uint64, l
 		}
 	}()
 
-	deletedBatches, deletedBlocks, err := partialPruneBatchTables(tx, keepRecentBatches)
+	deletedBatches, deletedBlocks, err := partialPruneBatchTables(tx, keepRecentBatches, genesisHeight)
 	if err != nil {
 		logv3.Error("Failed to perform batch operations", "error", err)
 		return 0, 0

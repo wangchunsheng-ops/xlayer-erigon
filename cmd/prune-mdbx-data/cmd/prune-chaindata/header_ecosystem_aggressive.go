@@ -12,7 +12,7 @@ import (
 
 // executeAggressiveHeaderEcosystemCleanup performs Header ecosystem cleanup for Aggressive mode
 // This extends the existing copy-truncate-restore logic to include CanonicalHeader
-func executeAggressiveHeaderEcosystemCleanup(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFromBatch, latestBatch uint64) (int, error) {
+func executeAggressiveHeaderEcosystemCleanup(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFromBatch, latestBatch, genesisHeight uint64) (int, error) {
 	fmt.Printf("🏗️ Aggressive Header ecosystem cleanup: CanonicalHeader + HeaderNumber + Header + BlockBody\n")
 
 	// Step 1: Identify all blocks in batches to keep (reuse existing logic)
@@ -39,7 +39,7 @@ func executeAggressiveHeaderEcosystemCleanup(tx kv.RwTx, hermezDb *hermez_db.Her
 
 	// Step 2: Copy data (extending existing copyBlockData to include CanonicalHeader)
 	fmt.Printf("Header ecosystem: Copying data for %d blocks...\n", len(preserveBlocks))
-	preservedData, err := copyHeaderEcosystemBlockData(tx, preserveBlocks)
+	preservedData, err := copyHeaderEcosystemBlockData(tx, preserveBlocks, genesisHeight)
 	if err != nil {
 		return 0, fmt.Errorf("failed to copy Header ecosystem data: %w", err)
 	}
@@ -63,7 +63,20 @@ func executeAggressiveHeaderEcosystemCleanup(tx kv.RwTx, hermezDb *hermez_db.Her
 }
 
 // copyHeaderEcosystemBlockData extends copyBlockData to include CanonicalHeader for aggressive mode
-func copyHeaderEcosystemBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
+func copyHeaderEcosystemBlockData(tx kv.RwTx, blockNos []uint64, genesisHeight uint64) ([]BlockData, error) {
+	// Genesis protection: Always preserve genesis block to prevent genesis rewrite
+	hasGenesis := false
+	for _, blockNo := range blockNos {
+		if blockNo == genesisHeight {
+			hasGenesis = true
+			break
+		}
+	}
+	if !hasGenesis {
+		fmt.Printf("🛡️ Protecting Genesis block (%d) to prevent PlainState corruption\n", genesisHeight)
+		blockNos = append([]uint64{genesisHeight}, blockNos...)
+	}
+
 	var preservedData []BlockData
 
 	// Reuse existing table definitions but ADD CanonicalHeader for aggressive mode

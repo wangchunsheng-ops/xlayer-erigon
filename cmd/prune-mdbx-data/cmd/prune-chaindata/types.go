@@ -10,12 +10,13 @@ const (
 
 // MainConfig holds all configuration for the pruning operation
 type MainConfig struct {
-	DBPath            string
-	PruneLevel        PruneLevel
-	KeepRecentBatches uint64
-	AutoYes           bool
-	FastDupCursorMode bool
-	SafeFastMode      bool
+	DBPath             string
+	PruneLevel         PruneLevel
+	KeepRecentBatches  uint64
+	AutoYes            bool
+	FastDupCursorMode  bool
+	SafeFastMode       bool
+	GenesisBlockHeight uint64 // Genesis block height to protect (default: 0)
 }
 
 // MainPaths holds database path configuration

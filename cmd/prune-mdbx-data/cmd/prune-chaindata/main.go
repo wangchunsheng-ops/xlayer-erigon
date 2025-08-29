@@ -121,6 +121,32 @@ func parseMainArguments(args []string, log logv3.Logger) (*MainConfig, error) {
 			config.SafeFastMode = true
 		case arg == "--yes" || arg == "-y":
 			config.AutoYes = true
+		case strings.HasPrefix(arg, "--genesis-height"):
+			if strings.Contains(arg, "=") {
+				// Format: --genesis-height=N
+				parts := strings.SplitN(arg, "=", 2)
+				if len(parts) == 2 {
+					if height, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
+						config.GenesisBlockHeight = height
+					} else {
+						log.Error("Invalid number for --genesis-height: %s", parts[1])
+						return nil, err
+					}
+				}
+			} else {
+				// Format: --genesis-height N
+				if i+1 < len(args) {
+					if height, err := strconv.ParseUint(args[i+1], 10, 64); err == nil {
+						config.GenesisBlockHeight = height
+						i++ // Skip next argument
+					} else {
+						log.Error("Invalid number for --genesis-height: %s", args[i+1])
+						return nil, err
+					}
+				} else {
+					return nil, fmt.Errorf("--genesis-height requires a number")
+				}
+			}
 
 		default:
 			// If it's not a flag and not the first arg (db path), check if it's a level
@@ -364,7 +390,7 @@ func executeMainPruningOperations(paths *MainPaths, analysis *MainAnalysis, conf
 		fmt.Printf("Closing database before batch operations...\n")
 		fmt.Printf("✓ Database closed\n")
 
-		stats.DeletedBatches, stats.DeletedBlocks = executeBatchOperationsWithCommit(paths.ChaindataPath, config.KeepRecentBatches, log, ctx)
+		stats.DeletedBatches, stats.DeletedBlocks = executeBatchOperationsWithCommit(paths.ChaindataPath, config.KeepRecentBatches, config.GenesisBlockHeight, log, ctx)
 	}
 
 	// Execute Aggressive mode operations with guaranteed commit (Aggressive mode only)
@@ -373,7 +399,7 @@ func executeMainPruningOperations(paths *MainPaths, analysis *MainAnalysis, conf
 
 		// Phase 1b: Header ecosystem cleanup - Clean indexes/mappings FIRST
 		// This ensures no dangling references to blocks that will have missing state data
-		headerRecords, headerSize := executeHeaderEcosystemCleanupWithCommit(paths.ChaindataPath, config.KeepRecentBatches, log, ctx)
+		headerRecords, headerSize := executeHeaderEcosystemCleanupWithCommit(paths.ChaindataPath, config.KeepRecentBatches, config.GenesisBlockHeight, log, ctx)
 		stats.DeletedCount += headerRecords
 		stats.ActualDeletedSize += headerSize
 

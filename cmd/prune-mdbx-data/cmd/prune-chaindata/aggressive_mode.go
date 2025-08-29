@@ -77,7 +77,7 @@ func executeDupCursorOperationsWithCommit(dbPath string, keepRecentBatches uint6
 
 // executeHeaderEcosystemCleanupWithCommit executes Header ecosystem cleanup with guaranteed commit for Aggressive mode
 // Reuses existing copy-truncate-restore infrastructure for consistency
-func executeHeaderEcosystemCleanupWithCommit(dbPath string, keepRecentBatches uint64, log logv3.Logger, ctx context.Context) (int, uint64) {
+func executeHeaderEcosystemCleanupWithCommit(dbPath string, keepRecentBatches uint64, genesisHeight uint64, log logv3.Logger, ctx context.Context) (int, uint64) {
 	fmt.Printf("\n=== Phase 1b: Header Ecosystem Cleanup ===\n")
 
 	// Open database for Header ecosystem operations
@@ -132,7 +132,7 @@ func executeHeaderEcosystemCleanupWithCommit(dbPath string, keepRecentBatches ui
 	}
 
 	// Execute Header ecosystem cleanup using existing copy-truncate-restore infrastructure
-	deletedHeaderRecords, err := executeAggressiveHeaderEcosystemCleanup(tx, hermezDb, keepFromBatch, latestBatch)
+	deletedHeaderRecords, err := executeAggressiveHeaderEcosystemCleanup(tx, hermezDb, keepFromBatch, latestBatch, genesisHeight)
 	if err != nil {
 		logv3.Error("Failed to perform Header ecosystem cleanup", "error", err)
 		return 0, 0

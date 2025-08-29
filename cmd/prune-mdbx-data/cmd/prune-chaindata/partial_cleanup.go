@@ -72,7 +72,7 @@ func getLatestBatchNumber(tx kv.Tx) (uint64, error) {
 }
 
 // partialPruneBatchTables performs batch-based pruning on block-related tables
-func partialPruneBatchTables(tx kv.RwTx, keepRecentBatches uint64) (int, int, error) {
+func partialPruneBatchTables(tx kv.RwTx, keepRecentBatches uint64, genesisHeight uint64) (int, int, error) {
 	hermezDb := hermez_db.NewHermezDbReader(tx)
 
 	// 1. Get latest batch number
@@ -93,26 +93,28 @@ func partialPruneBatchTables(tx kv.RwTx, keepRecentBatches uint64) (int, int, er
 		return 0, 0, nil
 	}
 
-	fmt.Printf("Will delete data for batches < %d\n", pruneBefore)
+	fmt.Printf("Pruning batches 0 to %d (before batch %d)\n", pruneBefore-1, pruneBefore)
 
-	// 3. Execute batch-level pruning
-	return executeBatchBasedPruning(tx, hermezDb, pruneBefore)
-}
-
-// executeBatchBasedPruning performs the actual batch-based pruning using Copy-Truncate-Restore strategy
-func executeBatchBasedPruning(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, pruneBefore uint64) (int, int, error) {
-	fmt.Printf("Starting optimized batch-level data pruning (Copy-Truncate-Restore strategy)...\n")
-
-	// Get latest batch to determine what to keep
-	latestBatch, err := getLatestBatchNumber(tx)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get latest batch number: %w", err)
+	// 3. Check if any batches need to be pruned
+	if pruneBefore == 0 {
+		fmt.Printf("No batches to prune\n")
+		return 0, 0, nil
 	}
+
+	// Early exit check
+	if pruneBefore > latestBatch {
+		fmt.Printf("Error: pruneBefore (%d) > latestBatch (%d)\n", pruneBefore, latestBatch)
+		return 0, 0, nil
+	}
+
+	// 4. Execute the pruning with optimized copy-truncate-restore strategy
+	fmt.Printf("🚀 Using optimized copy-truncate-restore strategy\n")
+	fmt.Printf("📋 Strategy: Copy data for batches %d-%d → Clear ALL → Restore copied data\n", pruneBefore, latestBatch)
 
 	// Determine batches to keep (pruneBefore and later)
 	keepFromBatch := pruneBefore
 	fmt.Printf("Preserving batches %d to %d, deleting batches 0 to %d\n", keepFromBatch, latestBatch, pruneBefore-1)
 
 	// Use optimized strategy: copy recent data, truncate tables, restore data
-	return executeCopyTruncateRestore(tx, hermezDb, keepFromBatch, latestBatch, pruneBefore)
+	return executeCopyTruncateRestore(tx, hermezDb, keepFromBatch, latestBatch, pruneBefore, genesisHeight)
 }

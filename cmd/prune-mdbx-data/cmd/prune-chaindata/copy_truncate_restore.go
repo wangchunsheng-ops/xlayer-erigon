@@ -18,7 +18,7 @@ type KeyValueEntry struct {
 }
 
 // executeCopyTruncateRestore implements the optimized pruning strategy
-func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFromBatch, latestBatch, pruneBefore uint64) (int, int, error) {
+func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, keepFromBatch, latestBatch, pruneBefore, genesisHeight uint64) (int, int, error) {
 	// Step 1: Identify all blocks in batches to keep
 	fmt.Printf("Step 1: Collecting blocks to preserve...\n")
 	var preserveBlocks []uint64
@@ -44,7 +44,7 @@ func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, 
 
 	// Step 2: Copy data to preserve
 	fmt.Printf("Step 2: Copying data for %d blocks...\n", len(preserveBlocks))
-	preservedData, err := copyBlockData(tx, preserveBlocks)
+	preservedData, err := copyBlockData(tx, preserveBlocks, genesisHeight)
 	if err != nil {
 		fmt.Printf("Failed to copy data, falling back to old method\n")
 		return executeLegacyPruning(tx, hermezDb, pruneBefore)
@@ -80,7 +80,20 @@ func executeCopyTruncateRestore(tx kv.RwTx, hermezDb *hermez_db.HermezDbReader, 
 }
 
 // copyBlockData copies data for specified blocks from all relevant tables
-func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
+func copyBlockData(tx kv.RwTx, blockNos []uint64, genesisHeight uint64) ([]BlockData, error) {
+	// Genesis protection: Always preserve genesis block to prevent genesis rewrite
+	hasGenesis := false
+	for _, blockNo := range blockNos {
+		if blockNo == genesisHeight {
+			hasGenesis = true
+			break
+		}
+	}
+	if !hasGenesis {
+		fmt.Printf("🛡️ Protecting Genesis block (%d) to prevent PlainState corruption\n", genesisHeight)
+		blockNos = append([]uint64{genesisHeight}, blockNos...)
+	}
+
 	var preservedData []BlockData
 
 	// Tables with simple block_number key (key = block_num_u64)
@@ -124,7 +137,18 @@ func copyBlockData(tx kv.RwTx, blockNos []uint64) ([]BlockData, error) {
 			}
 		}
 
-		// Note: CanonicalHeader copying is excluded from moderate mode
+		// Genesis protection: Save CanonicalHeader for Genesis block to prevent genesis rewrite
+		if blockNo == genesisHeight {
+			fmt.Printf("🛡️ Preserving Genesis CanonicalHeader (height=%d)\n", genesisHeight)
+			cursor, err := tx.CursorDupSort("CanonicalHeader")
+			if err == nil {
+				defer cursor.Close()
+				key, value, err := cursor.SeekExact(blockKey)
+				if err == nil && key != nil && value != nil {
+					blockData.Data["CanonicalHeader"] = append([]byte{}, value...)
+				}
+			}
+		}
 
 		// Copy data from composite key tables (need to find all keys starting with block_num)
 		for _, table := range compositeKeyTables {
@@ -229,7 +253,14 @@ func restoreBlockData(tx kv.RwTx, preservedData []BlockData) error {
 
 		// Restore data to each table
 		for table, data := range blockData.Data {
-			if simpleTables[table] {
+			// Genesis protection: Special handling for Genesis CanonicalHeader
+			if table == "CanonicalHeader" {
+				fmt.Printf("🛡️ Restoring Genesis CanonicalHeader (height=%d)\n", blockData.BlockNo)
+				err := tx.Put(table, blockKey, data)
+				if err != nil {
+					return fmt.Errorf("failed to restore Genesis CanonicalHeader: %w", err)
+				}
+			} else if simpleTables[table] {
 				// Simple table: direct key-value restoration
 				err := tx.Put(table, blockKey, data)
 				if err != nil {
