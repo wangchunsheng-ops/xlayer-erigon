@@ -29,10 +29,10 @@ hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -outpu
 cd test && make min-run
 # make txs fill blockchain states
 make pause
-export chaindata_dir=$(pwd)/data/seq/chaindata
-export smtdata_dir=$(pwd)/data/seq/smt
+export chaindata_dir=$(pwd)/data_state2/seq/chaindata
+export smtdata_dir=$(pwd)/data_state2/seq/smt
 hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output xlayer_dump_file.json
-hack -action checkStateRoot -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -ignore-scalable=true -input xlayer_dump_file.json
+hack -action checkStateRoot -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -ignore-scalable=true -input xlayer_dump_file.json
 ```
 
 ## run differential smt verify
