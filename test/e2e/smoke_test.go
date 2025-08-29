@@ -1538,14 +1538,6 @@ func TestGetBlockGasLimit(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestEstimate(t *testing.T) {
-	log.Infof("Start TestEstimate")
-	gaslimit, err := operations.GetBlockGasLimit()
-	require.NoError(t, err)
-	require.Equal(t, uint64(30000000), gaslimit)
-	require.NoError(t, err)
-}
-
 // TestHighGasEstimation tests gas estimation for high gas consumption transactions
 func TestHighGasEstimation(t *testing.T) {
 	log.Infof("Start TestHighGasEstimation")
