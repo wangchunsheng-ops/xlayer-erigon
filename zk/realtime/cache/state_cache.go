@@ -64,7 +64,7 @@ func (cache *StateCache) Clear() {
 
 func (cache *StateCache) GetStateReaderWithHeight(blockNum uint64) (state.StateReader, bool, error) {
 	cache.cacheLock.RLock()
-	defer cache.cacheLock.Unlock()
+	defer cache.cacheLock.RUnlock()
 
 	if blockNum < cache.globalHeight {
 		return nil, false, fmt.Errorf("block number %d is less than global height %d", blockNum, cache.globalHeight)
