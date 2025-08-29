@@ -13,8 +13,8 @@ import (
 	proto_txpool "github.com/ledgerwatch/erigon-lib/gointerfaces/txpool"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/eth/gasprice"
-	"github.com/ledgerwatch/erigon/ethclient"
 	"github.com/ledgerwatch/erigon/rpc"
+	"github.com/ledgerwatch/erigon/turbo/rpchelper"
 	"github.com/ledgerwatch/erigon/zk/apollo"
 	"github.com/ledgerwatch/erigon/zk/metrics"
 	"github.com/ledgerwatch/erigon/zk/sequencer"
@@ -192,32 +192,15 @@ func (api *APIImpl) MinGasPrice(ctx context.Context) (*hexutil.Big, error) {
 }
 
 func (api *APIImpl) GetBlockGasLimit(ctx context.Context) (*hexutil.Big, error) {
-
-	tx, err := api.db.BeginRo(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	cc, err := api.chainConfig(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-	chainId := cc.ChainID
-	if !api.isZkNonSequencer(chainId) {
+	if sequencer.IsSequencer() {
 		gasLimit := big.NewInt(int64(api.BlockGasLimit))
 		return (*hexutil.Big)(gasLimit), nil
 	}
 
-	client, err := ethclient.DialContext(ctx, api.l2RpcUrl)
-	if err != nil {
-		return nil, err
-	}
-	defer client.Close()
-
-	gasLimit, err := client.BlockGasLimit(ctx)
+	gasLimit, err := rpchelper.GetCachedBlockGasLimit()
 	if err != nil {
 		return nil, err
 	}
 
-	return (*hexutil.Big)(gasLimit), nil
+	return (*hexutil.Big)(big.NewInt(int64(gasLimit))), nil
 }
