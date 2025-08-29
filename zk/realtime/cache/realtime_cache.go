@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon/core/state"
 	kafkaTypes "github.com/ledgerwatch/erigon/zk/realtime/kafka/types"
 	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
 	"github.com/ledgerwatch/log/v3"
@@ -25,9 +26,10 @@ const (
 	// State cache size
 	DefaultGlobalStateCacheSize  = 1_000_000
 	DefaultPendingStateCacheSize = 1_000
+	DefaultBlockStateCacheSize   = 1_000
 
 	// Sync threshold config
-	PendingBlocksCacheSizeThreshold = 20
+	PendingBlocksCacheSizeThreshold = 100
 )
 
 type PendingBlockContext struct {
@@ -40,7 +42,7 @@ type PendingBlockContext struct {
 	// pendingTxs is the queue of pending txs to be processed in the current pending block
 	pendingTxs *realtimeTypes.OrderedList[*kafkaTypes.TransactionMessage]
 	// pendingStateCache is the pending state cache for the current pending block
-	pendingStateCache *PendingStateCache
+	blockStateCache *BlockStateCache
 }
 
 // String returns a formatted string representation of the PendingBlockContext
@@ -68,10 +70,11 @@ func ComparePendingBlockContext(a, b *PendingBlockContext) int {
 
 type RealtimeCache struct {
 	// Caches
-	State         *GlobalStateCache
-	Stateless     *StatelessCache
-	CacheDumpPath string
-	ReadyFlag     atomic.Bool
+	State           *StateCache
+	Stateless       *StatelessCache
+	ReadyFlag       atomic.Bool
+	CacheDumpPath   string
+	HeightThreshold uint64
 
 	// highestConfirmHeight is the highest confirmed block height closed from kafka
 	highestConfirmHeight atomic.Uint64
@@ -86,22 +89,18 @@ type RealtimeCache struct {
 	pendingBlocks *realtimeTypes.OrderedList[*PendingBlockContext]
 }
 
-func NewRealtimeCache(ctx context.Context, db kv.RoDB, cacheDumpPath string) (*RealtimeCache, error) {
-	stateCache, err := NewGlobalStateCache(ctx, db, DefaultGlobalStateCacheSize)
-	if err != nil {
-		return nil, err
-	}
-
+func NewRealtimeCache(ctx context.Context, db kv.RoDB, cacheDumpPath string, heightThreshold uint64) *RealtimeCache {
 	return &RealtimeCache{
-		State:                  stateCache,
+		State:                  NewStateCache(ctx, db, DefaultGlobalStateCacheSize, DefaultBlockStateCacheSize),
 		Stateless:              NewStatelessCache(DefaultStatelessBlockCacheSize, DefaultStatelessTxCacheSize),
-		CacheDumpPath:          cacheDumpPath,
 		ReadyFlag:              atomic.Bool{},
+		CacheDumpPath:          cacheDumpPath,
+		HeightThreshold:        heightThreshold,
 		highestConfirmHeight:   atomic.Uint64{},
 		highestExecutionHeight: atomic.Uint64{},
 		highestPendingHeight:   atomic.Uint64{},
 		pendingBlocks:          NewPendingBlockContextList(DefaultPendingBlockSize),
-	}, nil
+	}
 }
 
 func (cache *RealtimeCache) Clear() {
@@ -131,6 +130,11 @@ func (cache *RealtimeCache) GetExecutionHeight() uint64 {
 func (cache *RealtimeCache) UpdateExecution(finishEntry realtimeTypes.FinishedEntry) {
 	if finishEntry.Height > cache.highestExecutionHeight.Load() {
 		cache.highestExecutionHeight.Store(finishEntry.Height)
+
+		// Clear cache
+		deleteHeight := finishEntry.Height - cache.HeightThreshold
+		cache.Stateless.DeleteBlock(deleteHeight)
+		cache.State.FlushBlock(deleteHeight)
 	}
 }
 
@@ -149,19 +153,6 @@ func (cache *RealtimeCache) PutHighestPendingHeight(blockNum uint64) {
 	if blockNum > cache.highestPendingHeight.Load() {
 		cache.highestPendingHeight.Store(blockNum)
 	}
-}
-
-func (cache *RealtimeCache) GetPendingStateCache(blockNum uint64) *PendingStateCache {
-	if cache.pendingBlocks.Size() == 0 {
-		return nil
-	}
-
-	for _, context := range cache.pendingBlocks.Items() {
-		if context.blockNum == blockNum {
-			return context.pendingStateCache
-		}
-	}
-	return nil
 }
 
 func (cache *RealtimeCache) TryInitStateCache(executionHeight uint64) error {
@@ -258,7 +249,7 @@ func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContex
 			return fmt.Errorf("failed to get inner txs. Block number: %d, tx index: %d, error: %v", txMsg.BlockNumber, blockContext.nextTxIndex, err)
 		}
 		cache.Stateless.PutTxInfo(blockContext.blockNum, txMsg.Hash, tx, receipt, innerTxs)
-		blockContext.pendingStateCache.ApplyChangeset(txMsg.Changeset, txMsg.BlockNumber, txMsg.Receipt.TransactionIndex)
+		blockContext.blockStateCache.ApplyChangeset(txMsg.Changeset, txMsg.BlockNumber, txMsg.Receipt.TransactionIndex)
 		blockContext.nextTxIndex++
 		processed++
 	}
@@ -291,13 +282,23 @@ func (cache *RealtimeCache) tryCreateNewPendingBlockContext(blockNum uint64) err
 		return fmt.Errorf("too many pending blocks, realtime cache state corrupted. Pending blocks queue size: %d", cache.pendingBlocks.Size())
 	}
 
+	// Create block state cache
+	prevStateReader, isGlobal, err := cache.State.GetStateReaderWithHeight(blockNum - 1)
+	if err != nil {
+		return fmt.Errorf("failed to get previous block state reader, blockNum: %d, err: %v", blockNum, err)
+	}
+	bc := NewBlockStateCache(blockNum, prevStateReader, DefaultPendingStateCacheSize)
+	if isGlobal {
+		bc.AddGlobalStateReader(prevStateReader)
+	}
+
 	// Create new pending block context
 	newPendingBlockContext := &PendingBlockContext{
-		blockNum:          blockNum,
-		nextTxIndex:       0,
-		pendingTxs:        realtimeTypes.NewOrderedList(DefaultTxMsgSliceSize, CompareTransactionMessages),
-		txCount:           -1,
-		pendingStateCache: NewPendingStateCache(cache.State, DefaultPendingStateCacheSize),
+		blockNum:        blockNum,
+		nextTxIndex:     0,
+		pendingTxs:      realtimeTypes.NewOrderedList(DefaultTxMsgSliceSize, CompareTransactionMessages),
+		txCount:         -1,
+		blockStateCache: bc,
 	}
 	cache.pendingBlocks.Add(newPendingBlockContext)
 	cache.pendingBlocks.Sort()
@@ -340,8 +341,39 @@ func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockConte
 		}
 	}
 	cache.PutHighestConfirmHeight(pendingBlockContext.blockNum)
-	cache.State.FlushState(pendingBlockContext.pendingStateCache.cache)
+	cache.State.AddBlock(pendingBlockContext.blockNum, pendingBlockContext.blockStateCache)
 	log.Info(fmt.Sprintf("[Realtime] Closed block %d, pending blocks queue size: %d", pendingBlockContext.blockNum, cache.pendingBlocks.Size()))
+}
+
+// -------------- Retrieve state readers utiliy operations --------------
+func (cache *RealtimeCache) GetPendingStateCache() state.StateReader {
+	if cache.pendingBlocks.Size() == 0 {
+		return nil
+	}
+
+	pendingHeight := cache.GetHighestPendingHeight()
+	for _, context := range cache.pendingBlocks.Items() {
+		if context.blockNum == pendingHeight {
+			return context.blockStateCache
+		}
+	}
+	return nil
+}
+
+func (cache *RealtimeCache) GetLatestStateCache() state.StateReader {
+	stateReader, _, err := cache.State.GetStateReaderWithHeight(cache.GetHighestConfirmHeight())
+	if err != nil {
+		return nil
+	}
+	return stateReader
+}
+
+func (cache *RealtimeCache) GetStateReaderByHeight(blockNum uint64) state.StateReader {
+	stateReader, _, err := cache.State.GetStateReaderWithHeight(blockNum)
+	if err != nil {
+		return nil
+	}
+	return stateReader
 }
 
 // -------------- Debug operations --------------

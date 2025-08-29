@@ -4,32 +4,47 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
+	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/turbo/trie"
 	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
 	"github.com/ledgerwatch/log/v3"
 )
 
-// GlobalStateCache implements the plain state reader with a changeset cache layer.
-// The pending cache holds the pending chainstate - it holds the global state cache,
-// with a changeset cache layer that stores in-memory the pending state changes.
-type PendingStateCache struct {
-	globalCache *GlobalStateCache
-	cacheLock   sync.RWMutex
-	cache       *stateCache
+// BlockStateCache implements the plain state reader with a changeset cache layer.
+// The block state cache holds the block chainstate, and the previous block state
+// cache reader.
+type BlockStateCache struct {
+	height    uint64
+	prevCache state.StateReader
+	nextFlag  atomic.Bool
+
+	cacheLock sync.RWMutex
+	cache     *plainStateCache
 }
 
-func NewPendingStateCache(globalCache *GlobalStateCache, size int) *PendingStateCache {
-	return &PendingStateCache{
-		globalCache: globalCache,
-		cache:       newStateCache(size),
+func NewBlockStateCache(height uint64, stateReader state.StateReader, size int) *BlockStateCache {
+	return &BlockStateCache{
+		height:    height,
+		prevCache: stateReader,
+		cache:     newPlainStateCache(size),
+		nextFlag:  atomic.Bool{},
 	}
 }
 
-func (cache *PendingStateCache) ApplyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
+func (cache *BlockStateCache) AddGlobalStateReader(globalStateReader state.StateReader) {
+	cache.cacheLock.Lock()
+	defer cache.cacheLock.Unlock()
+
+	cache.prevCache = globalStateReader
+	cache.nextFlag.Store(true)
+}
+
+func (cache *BlockStateCache) ApplyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
@@ -78,7 +93,7 @@ func (cache *PendingStateCache) ApplyChangeset(changeset *realtimeTypes.Changese
 	return nil
 }
 
-func (cache *PendingStateCache) applyChangesetToAccountData(changeset *realtimeTypes.Changeset, addressChanges map[libcommon.Address]*accounts.Account) (err error) {
+func (cache *BlockStateCache) applyChangesetToAccountData(changeset *realtimeTypes.Changeset, addressChanges map[libcommon.Address]*accounts.Account) (err error) {
 	// Apply balance changes
 	for address, balance := range changeset.BalanceChanges {
 		if _, ok := changeset.DeletedAccounts[address]; ok {
@@ -134,7 +149,7 @@ func (cache *PendingStateCache) applyChangesetToAccountData(changeset *realtimeT
 	return nil
 }
 
-func (cache *PendingStateCache) getOrCreateAccount(address libcommon.Address, addressChanges map[libcommon.Address]*accounts.Account) (*accounts.Account, error) {
+func (cache *BlockStateCache) getOrCreateAccount(address libcommon.Address, addressChanges map[libcommon.Address]*accounts.Account) (*accounts.Account, error) {
 	account, ok := addressChanges[address]
 	if !ok {
 		var err error
@@ -156,17 +171,17 @@ func (cache *PendingStateCache) getOrCreateAccount(address libcommon.Address, ad
 	return account, nil
 }
 
-func (cache *PendingStateCache) unsafeReadAccountData(address libcommon.Address) (*accounts.Account, error) {
+func (cache *BlockStateCache) unsafeReadAccountData(address libcommon.Address) (*accounts.Account, error) {
 	acc, ok := cache.cache.accountCache[address]
 	if ok {
 		return acc, nil
 	}
 
-	// Cache miss, read from global cache
-	return cache.globalCache.ReadAccountData(address)
+	// Cache miss
+	return cache.prevCache.ReadAccountData(address)
 }
 
-func (cache *PendingStateCache) createAccount() (*accounts.Account, error) {
+func (cache *BlockStateCache) createAccount() (*accounts.Account, error) {
 	return &accounts.Account{
 		Initialised: true,
 		Root:        libcommon.BytesToHash(trie.EmptyRoot[:]),
@@ -175,7 +190,7 @@ func (cache *PendingStateCache) createAccount() (*accounts.Account, error) {
 }
 
 // -------------- StateReader implementation --------------
-func (cache *PendingStateCache) ReadAccountData(address libcommon.Address) (*accounts.Account, error) {
+func (cache *BlockStateCache) ReadAccountData(address libcommon.Address) (*accounts.Account, error) {
 	cache.cacheLock.RLock()
 	acc, ok := cache.cache.accountCache[address]
 	if ok {
@@ -186,10 +201,10 @@ func (cache *PendingStateCache) ReadAccountData(address libcommon.Address) (*acc
 	cache.cacheLock.RUnlock()
 
 	// Cache miss, read from global cache
-	return cache.globalCache.ReadAccountData(address)
+	return cache.prevCache.ReadAccountData(address)
 }
 
-func (cache *PendingStateCache) ReadAccountStorage(address libcommon.Address, incarnation uint64, key *libcommon.Hash) ([]byte, error) {
+func (cache *BlockStateCache) ReadAccountStorage(address libcommon.Address, incarnation uint64, key *libcommon.Hash) ([]byte, error) {
 	compositeKey := dbutils.PlainGenerateCompositeStorageKey(address.Bytes(), incarnation, key.Bytes())
 
 	cache.cacheLock.RLock()
@@ -202,10 +217,10 @@ func (cache *PendingStateCache) ReadAccountStorage(address libcommon.Address, in
 	cache.cacheLock.RUnlock()
 
 	// Cache miss, read from global cache
-	return cache.globalCache.ReadAccountStorage(address, incarnation, key)
+	return cache.prevCache.ReadAccountStorage(address, incarnation, key)
 }
 
-func (cache *PendingStateCache) ReadAccountCode(address libcommon.Address, incarnation uint64, codeHash libcommon.Hash) ([]byte, error) {
+func (cache *BlockStateCache) ReadAccountCode(address libcommon.Address, incarnation uint64, codeHash libcommon.Hash) ([]byte, error) {
 	if bytes.Equal(codeHash.Bytes(), emptyCodeHash) {
 		return nil, nil
 	}
@@ -220,15 +235,15 @@ func (cache *PendingStateCache) ReadAccountCode(address libcommon.Address, incar
 	cache.cacheLock.RUnlock()
 
 	// Cache miss, read from global cache
-	return cache.globalCache.ReadAccountCode(address, incarnation, codeHash)
+	return cache.prevCache.ReadAccountCode(address, incarnation, codeHash)
 }
 
-func (cache *PendingStateCache) ReadAccountCodeSize(address libcommon.Address, incarnation uint64, codeHash libcommon.Hash) (int, error) {
+func (cache *BlockStateCache) ReadAccountCodeSize(address libcommon.Address, incarnation uint64, codeHash libcommon.Hash) (int, error) {
 	code, err := cache.ReadAccountCode(address, incarnation, codeHash)
 	return len(code), err
 }
 
-func (cache *PendingStateCache) ReadAccountIncarnation(address libcommon.Address) (uint64, error) {
+func (cache *BlockStateCache) ReadAccountIncarnation(address libcommon.Address) (uint64, error) {
 	cache.cacheLock.RLock()
 	incarnation, ok := cache.cache.incarnationMapCache[address]
 	cache.cacheLock.RUnlock()
@@ -237,5 +252,5 @@ func (cache *PendingStateCache) ReadAccountIncarnation(address libcommon.Address
 	}
 
 	// Cache miss, read from global cache
-	return cache.globalCache.ReadAccountIncarnation(address)
+	return cache.prevCache.ReadAccountIncarnation(address)
 }
