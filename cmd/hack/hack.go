@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/schollz/progressbar/v3"
 	"math/big"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec
@@ -1750,7 +1751,10 @@ func checkStateRoot(smtData, genesisFile string) error {
 			if value.Storage != nil {
 				startOverride := time.Now()
 				storageChanges[address] = make(map[string]string)
-				logger.Debug("storage", "total counts", len(value.Storage))
+				logger.Info("scalable storage", "total counts", len(value.Storage))
+
+				bar := progressbar.NewOptions(len(value.Storage), progressbar.OptionSetPredictTime(true))
+
 				for k, _ := range value.Storage {
 					keyHash := libcommon.HexToHash(k)
 					valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
@@ -1760,7 +1764,9 @@ func checkStateRoot(smtData, genesisFile string) error {
 					}
 					valInSmtHex := hexutility.Encode(common.LeftPadBytes(valInSmt, 32))
 					storageChanges[address][k] = valInSmtHex
+					bar.Add(1)
 				}
+				bar.Finish()
 				elapsedOverride := time.Since(startOverride).Seconds()
 				logger.Info("override storage", "elapsedOverride", elapsedOverride)
 			}
