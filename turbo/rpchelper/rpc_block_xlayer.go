@@ -163,10 +163,10 @@ func startBackgroundQuery(ctx context.Context, interval time.Duration) {
 			bn, err := getFinalizedBatchNumberFromSequencer(sequencerRpcUrl)
 			if err != nil {
 				log.Error("failed to get finalized batch number from sequencer", "err", err)
-				// continue
+			} else {
+				newVal := bn
+				currentFinalizedBatchNumber.Store(&newVal)
 			}
-			newVal := bn
-			currentFinalizedBatchNumber.Store(&newVal)
 
 			// Also fetch block gas limit
 			gasLimit, err := getBlockGasLimitFromSequencer(sequencerRpcUrl)
