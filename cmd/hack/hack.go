@@ -2364,24 +2364,38 @@ func calcSmtRoot(input string) error {
 	fmt.Println("calculate level elapsed:", time.Since(start2))
 
 	start3 := time.Now()
-	// 2. 计算所有叶子节点的哈希
-	for i := range nodeKvs {
-		// value hash
-		valueHash := utils.Hash(
-			nodeKvs[i].Value,
-			utils.BranchCapacity,
-		)
+	// 2. 并发计算所有叶子节点的哈希
+	chunkSize = (len(nodeKvs) + numWorkers - 1) / numWorkers
 
-		// leaf hash
-		remainingKey := utils.RemoveKeyBits(nodeKvs[i].Key, nodeKvs[i].level)
-		nodeKvs[i].leafHash = utils.Hash(
-			[8]uint64{
-				remainingKey[0], remainingKey[1], remainingKey[2], remainingKey[3],
-				valueHash[0], valueHash[1], valueHash[2], valueHash[3],
-			},
-			utils.LeafCapacity,
-		)
+	for i := 0; i < len(nodeKvs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(nodeKvs) {
+			end = len(nodeKvs)
+		}
+
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				// value hash
+				valueHash := utils.Hash(
+					nodeKvs[i].Value,
+					utils.BranchCapacity,
+				)
+
+				// leaf hash
+				remainingKey := utils.RemoveKeyBits(nodeKvs[i].Key, nodeKvs[i].level)
+				nodeKvs[i].leafHash = utils.Hash(
+					[8]uint64{
+						remainingKey[0], remainingKey[1], remainingKey[2], remainingKey[3],
+						valueHash[0], valueHash[1], valueHash[2], valueHash[3],
+					},
+					utils.LeafCapacity,
+				)
+			}
+		}(i, end)
 	}
+	wg.Wait()
 	fmt.Println("calculate leaf hash elapsed:", time.Since(start3))
 
 	start4 := time.Now()
@@ -2409,11 +2423,33 @@ func calculateRoot(nodeKVs []NodeKV, start, end, level int) [4]uint64 {
 
 	// 计算左右子树的哈希
 	var leftHash, rightHash [4]uint64
-	if splitIndex > start {
-		leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
-	}
-	if splitIndex < end {
-		rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+	if end-start > 100000 {
+		var wg sync.WaitGroup
+
+		if splitIndex > start {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
+			}()
+		}
+
+		if splitIndex < end {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+			}()
+		}
+
+		wg.Wait()
+	} else {
+		if splitIndex > start {
+			leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
+		}
+		if splitIndex < end {
+			rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+		}
 	}
 
 	// 计算当前节点哈希
