@@ -527,7 +527,6 @@ func migrateGenesis(chaindata, input, output string) error {
 		}
 
 		if a.Incarnation != 1 {
-			fmt.Println("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
 			log.Info("CodeHash:%x\nIncarnation:%d\nNonce:%d\nblance:%s\n", a.CodeHash, a.Incarnation, a.Nonce, a.Balance.String())
 		}
 
@@ -2022,7 +2021,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			smtIncremental := smt.NewSMT(db2.NewEriDb(txn, tx), false)
 		*/
 
-		fmt.Println("Begin SetAccountStorage")
+		fmt.Println("Begin SetAccountStorage:", len(accChanges))
 		bar := progressbar.NewOptions(len(accChanges), progressbar.OptionSetPredictTime(true))
 		for addr, acc := range accChanges {
 			if err := smtIncremental.SetAccountStorage(addr, acc); err != nil {
@@ -2033,7 +2032,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		bar.Finish()
 		fmt.Println()
 
-		fmt.Println("Begin SetContractBytecode")
+		fmt.Println("Begin SetContractBytecode", len(codeChanges))
 		bar = progressbar.NewOptions(len(codeChanges), progressbar.OptionSetPredictTime(true))
 		for addr, code := range codeChanges {
 			if err := smtIncremental.SetContractBytecode(addr.String(), code); err != nil {
@@ -2044,11 +2043,12 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 		bar.Finish()
 		fmt.Println()
 
-		fmt.Println("Begin SetContractStorage")
 		totalStorage := 0
 		for _, storage := range storageChanges {
 			totalStorage += len(storage)
 		}
+		fmt.Println("Begin SetContractStorage", totalStorage)
+
 		bar = progressbar.NewOptions(totalStorage, progressbar.OptionSetPredictTime(true))
 		for addr, storage := range storageChanges {
 			if _, err := smtIncremental.SetContractStorage(addr.String(), storage, nil); err != nil {
@@ -2138,7 +2138,65 @@ func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
 	return result
 }
 
+func TinyScalarToArrayUint64(scalar uint64) [8]uint64 {
+	var result [8]uint64
+
+	result[0] = scalar & 0xFFFFFFFF
+	result[1] = (scalar >> 32) & 0xFFFFFFFF
+
+	return result
+}
+
+type NodeKV struct {
+	Key      utils.NodeKey
+	Value    [8]uint64
+	leafHash [4]uint64
+	level    int // [0, 255]
+	path     []int
+}
+
+func calculateLevels(nodeKvs []NodeKV, startLevel int) {
+	if len(nodeKvs) <= 1 || startLevel > 255 {
+		return
+	}
+
+	// Find the position that split the tree into two subtrees.
+	splitIndex := sort.Search(len(nodeKvs), func(i int) bool {
+		return nodeKvs[i].Key.GetPath()[startLevel] == 1
+	})
+
+	if splitIndex == 0 {
+		// All nodes belong to the right subtree. So we treat the right subtree as the main tree.
+		calculateLevels(nodeKvs, startLevel+1)
+	} else if splitIndex == len(nodeKvs) {
+		// All nodes belong to the left subtree. So we treat the left subtree as the main tree.
+		calculateLevels(nodeKvs, startLevel+1)
+	} else {
+		// Both left subtree and right subtree have node(s), so we should create a parent node for two subtrees.
+		// That also means we should increase the level by 1 for all nodes.
+		for i := range nodeKvs {
+			nodeKvs[i].level = startLevel + 1
+		}
+		// recursive process the subtrees
+		calculateLevels(nodeKvs[:splitIndex], startLevel+1)
+		calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+	}
+}
+
+func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey {
+	storageKeyBig := utils.ConvertHexToBigInt(storageKey)
+	storageKeyArr := ScalarToArrayUint64(storageKeyBig)
+	hk0 := utils.Hash(storageKeyArr, utils.BranchCapacity)
+	var key1 = [8]uint64{ethaddr[0], ethaddr[1], ethaddr[2], ethaddr[3], ethaddr[4], ethaddr[5], uint64(utils.SC_STORAGE), uint64(0)}
+	return utils.Hash(key1, hk0)
+}
+
 func calcSmtRoot(input string) error {
+	start00 := time.Now()
+	defer func() {
+		fmt.Println("total elapsed:", time.Since(start00))
+	}()
+
 	var jsonData map[string]map[string]accInfo
 	if input == "" {
 		input = "genesis.json"
@@ -2158,70 +2216,163 @@ func calcSmtRoot(input string) error {
 	}
 
 	alloc := jsonData["alloc"]
-	_ = alloc
 
-	initialCapacity := 1000
-
-	type NodeKV struct {
-		Key   utils.NodeKey
-		Value [8]uint64
+	if _, ok := jsonData["alloc"]; ok {
+		if _, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"]; ok {
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000002", v, " ===> 0x0000000000000000000000000000000000000000000000000000000068ad8a02")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"] = "0x0000000000000000000000000000000000000000000000000000000068ad8a02"
+			}
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000003", v, " ===> 0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000003"] = "0xc85449a484084dabf69a439d50830038e6478eee3c0b1ec488151bbd6f5280eb"
+			}
+			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"]; ok {
+				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000000", v, " ===> 0x000000000000000000000000000000000000000000000000000000000083223c")
+				jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000000"] = "0x000000000000000000000000000000000000000000000000000000000083223c"
+			}
+		}
 	}
+
+	initialCapacity := len(alloc)
 
 	nodeKvs := make([]NodeKV, 0, initialCapacity)
 
+	start1 := time.Now()
 	for addr, acc := range alloc {
 		addr = libcommon.HexToAddress(addr).String()
-		balanceKey := utils.KeyEthAddrBalance(addr)
-		balanceBig := new(big.Int)
 		if !isEmpty(acc.Balance) {
-			balanceBig.SetString(acc.Balance, 16)
+			balanceKey := utils.KeyEthAddrBalance(addr)
+			balanceBig := utils.ConvertHexToBigInt(acc.Balance)
+			balanceValue := ScalarToArrayUint64(balanceBig)
+
+			nodeKvs = append(nodeKvs, NodeKV{
+				Key:   balanceKey,
+				Value: balanceValue,
+			})
 		}
-		balanceValue := ScalarToArrayUint64(balanceBig)
 
-		nodeKvs = append(nodeKvs, NodeKV{
-			Key:   balanceKey,
-			Value: balanceValue,
-		})
-
-		nonceKey := utils.KeyEthAddrNonce(addr)
-		nonceBig := new(big.Int)
 		if !isEmpty(acc.Nonce) {
-			nonceBig.SetString(acc.Nonce, 16)
-		}
-		nonceValue := ScalarToArrayUint64(nonceBig)
-		nodeKvs = append(nodeKvs, NodeKV{
-			Key:   nonceKey,
-			Value: nonceValue,
-		})
-
-		slices.SortFunc(nodeKvs, func(a, b NodeKV) int {
-			leftPath := a.Key.GetPath()
-			rightPath := b.Key.GetPath()
-			for k := 0; k < 256; k++ {
-				if leftPath[k] < rightPath[k] {
-					return -1
-				}
-				if leftPath[k] > rightPath[k] {
-					return 1
-				}
-			}
-			return 0
-		})
-
-		leafValueHashes := make([]*[4]uint64, 0, len(nodeKvs))
-		leafHashes := make([]*[4]uint64, 0, len(nodeKvs))
-		for _, kv := range nodeKvs {
-			leafValueHash := utils.HashByPointers(&kv.Value, &utils.LeafCapacity)
-			leafValueHashes = append(leafValueHashes, leafValueHash)
-			var in [8]uint64
-			copy(in[0:4], kv.Key[:])
-			copy(in[4:8], leafValueHash[:])
-			leafHashes = append(leafHashes, utils.HashByPointers(&in, &utils.LeafCapacity))
+			nonceKey := utils.KeyEthAddrNonce(addr)
+			nonceBig := utils.ConvertHexToBigInt(acc.Nonce)
+			nonceValue := ScalarToArrayUint64(nonceBig)
+			nodeKvs = append(nodeKvs, NodeKV{
+				Key:   nonceKey,
+				Value: nonceValue,
+			})
 		}
 
+		if !isEmpty(acc.Code) {
+			keyContractCode := utils.KeyContractCode(addr)
+			keyContractLength := utils.KeyContractLength(addr)
+			bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
+			nodeKvs = append(nodeKvs, NodeKV{
+				Key:   keyContractCode,
+				Value: ScalarToArrayUint64(bi),
+			})
+			nodeKvs = append(nodeKvs, NodeKV{
+				Key:   keyContractLength,
+				Value: TinyScalarToArrayUint64(uint64(bytecodeLength)),
+			})
+		}
+
+		for k, v := range acc.Storage {
+			addrBig := utils.ConvertHexToBigInt(addr)
+			addrArr := ScalarToArrayUint64(addrBig)
+			storageBig := utils.ConvertHexToBigInt(v)
+			storageValue := ScalarToArrayUint64(storageBig)
+			storageKey := KeyContractStorageHack(addrArr, k)
+			nodeKvs = append(nodeKvs, NodeKV{
+				Key:   storageKey,
+				Value: storageValue,
+			})
+		}
 	}
 
+	for i := range nodeKvs {
+		nodeKvs[i].path = nodeKvs[i].Key.GetPath()
+	}
+	fmt.Println("prepare elapsed:", time.Since(start1))
+
+	start11 := time.Now()
+	slices.SortFunc(nodeKvs, func(a, b NodeKV) int {
+		for k := 0; k < 256; k++ {
+			if a.path[k] < b.path[k] {
+				return -1
+			}
+			if a.path[k] > b.path[k] {
+				return 1
+			}
+		}
+		return 0
+	})
+	fmt.Println("sorting nodes elapsed:", time.Since(start11))
+
+	start2 := time.Now()
+	calculateLevels(nodeKvs, 0)
+	fmt.Println("calculate level elapsed:", time.Since(start2))
+
+	start3 := time.Now()
+	// 2. 计算所有叶子节点的哈希
+	for i := range nodeKvs {
+		// value hash
+		valueHash := utils.Hash(
+			nodeKvs[i].Value,
+			utils.BranchCapacity,
+		)
+
+		// leaf hash
+		remainingKey := utils.RemoveKeyBits(nodeKvs[i].Key, nodeKvs[i].level)
+		nodeKvs[i].leafHash = utils.Hash(
+			[8]uint64{
+				remainingKey[0], remainingKey[1], remainingKey[2], remainingKey[3],
+				valueHash[0], valueHash[1], valueHash[2], valueHash[3],
+			},
+			utils.LeafCapacity,
+		)
+	}
+	fmt.Println("calculate leaf hash elapsed:", time.Since(start3))
+
+	start4 := time.Now()
+	root := utils.NodeKey(calculateRoot(nodeKvs, 0, len(nodeKvs), 0))
+	fmt.Println("calculate root hash elapsed:", time.Since(start4))
+
+	fmt.Println("root: ", utils.ConvertBigIntToHex(root.ToBigInt()))
+
 	return nil
+}
+
+func calculateRoot(nodeKVs []NodeKV, start, end, level int) [4]uint64 {
+	if start >= end {
+		return [4]uint64{0, 0, 0, 0} // 空节点返回零哈希
+	}
+
+	if start+1 == end {
+		return nodeKVs[start].leafHash // 单个节点返回其叶子哈希
+	}
+
+	// 找到分界点
+	splitIndex := sort.Search(end-start, func(i int) bool {
+		return nodeKVs[start+i].path[level] == 1
+	}) + start
+
+	// 计算左右子树的哈希
+	var leftHash, rightHash [4]uint64
+	if splitIndex > start {
+		leftHash = calculateRoot(nodeKVs, start, splitIndex, level+1)
+	}
+	if splitIndex < end {
+		rightHash = calculateRoot(nodeKVs, splitIndex, end, level+1)
+	}
+
+	// 计算当前节点哈希
+	return utils.Hash(
+		[8]uint64{
+			leftHash[0], leftHash[1], leftHash[2], leftHash[3],
+			rightHash[0], rightHash[1], rightHash[2], rightHash[3],
+		},
+		utils.BranchCapacity,
+	)
 }
 
 func isEmpty(s string) bool {
@@ -2402,6 +2553,8 @@ func main() {
 		err = checkStateRoot2(*chaindata, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
+	case "calcSmtRoot":
+		err = calcSmtRoot(*input)
 	default:
 		fmt.Printf("Unknown action: %s\n", *action)
 		return

@@ -167,9 +167,7 @@ func (s *SMT) InsertStorage(ethAddr string, storage *map[string]string, chm *map
 
 	a := utils.ConvertHexToBigInt(ethAddr)
 	add := utils.ScalarToArrayBig(a)
-	fmt.Println("before get last storage root")
 	or, err := s.getLastRoot()
-	fmt.Println("end get last storage root")
 	if err != nil {
 		return nil, err
 	}
@@ -684,6 +682,37 @@ type TraverseAction func(prefix []byte, k utils.NodeKey, v utils.NodeValue12) (b
 
 func (s *RoSMT) Traverse(ctx context.Context, node *big.Int, action TraverseAction) error {
 	return s.traverse(ctx, node, action, []byte{})
+}
+
+func (s *RoSMT) GetExact(ctx context.Context, node *big.Int, key []byte) ([]byte, error) {
+
+	ky := utils.ScalarToRoot(node)
+
+	for i := 0; i < 256; i++ {
+
+		nodeValue, err := s.DbRo.Get(ky)
+		if err != nil {
+			return nil, err
+		}
+
+		if nodeValue.IsFinalNode() {
+			valHash := nodeValue.Get4to8()
+			v, err := s.DbRo.Get(*valHash)
+			if err != nil {
+				return nil, err
+			}
+			return utils.ArrayBigToScalar(utils.BigIntArrayFromNodeValue8(v.GetNodeValue8())).Bytes(), nil
+		}
+
+		if key[i] == 0 {
+			ky = utils.NodeKeyFromBigIntArray(nodeValue[0:4])
+		} else {
+			ky = utils.NodeKeyFromBigIntArray(nodeValue[4:8])
+		}
+
+	}
+
+	return nil, nil
 }
 
 // For X Layer, traverse performs an iterative pre-order DFS traversal of the SMT
