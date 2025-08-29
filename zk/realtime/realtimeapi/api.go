@@ -59,7 +59,7 @@ func (api *RealtimeAPIImpl) getBlockNumberOrHash(blockNrOrHash rpc.BlockNumberOr
 		}
 		return blockNum, nil
 	} else {
-		blockNum, found := api.cacheDB.Stateless.GetBlockNumberByHash(*blockNrOrHash.BlockHash)
+		blockNum, found := api.cacheDB.Stateless.GetBlockNumberByHash(hash)
 		if !found {
 			return 0, fmt.Errorf("block %x not found", hash)
 		}
