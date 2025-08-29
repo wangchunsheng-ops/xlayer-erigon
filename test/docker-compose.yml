@@ -404,7 +404,7 @@ services:
       - ./config/dynamic-mynetwork-chainspec.json:/usr/src/app/dynamic-mynetwork-chainspec.json
       - ./config/dynamic-mynetwork-conf.json:/usr/src/app/dynamic-mynetwork-conf.json
     command: >
-      /bin/sh -c "CONFIG_FILE=config; if [ \"$$RT_ENABLED\" = \"1\" ]; then CONFIG_FILE=config.rt; fi; dlv exec /usr/local/bin/cdk-erigon --listen=:40000 --headless=true --api-version=2 --accept-multiclient -- --http.vhosts=* --http.corsdomain=* --ws --config=/usr/src/app/$$CONFIG_FILE.yaml"
+      /bin/sh -c "CONFIG_FILE=config; if [ \"$$RT_ENABLED\" = \"1\" ]; then CONFIG_FILE=config.rt; fi; /usr/local/bin/cdk-erigon --http.vhosts=* --http.corsdomain=* --ws --config=/usr/src/app/$$CONFIG_FILE.yaml"
 
   xlayer-rpc-2:
     container_name: xlayer-rpc-2

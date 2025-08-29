@@ -1529,3 +1529,11 @@ func TestVerification(t *testing.T) {
 
 	log.Info("Verification delay batch test completed successfully")
 }
+
+func TestGetBlockGasLimit(t *testing.T) {
+	log.Infof("Start TestGetBlockGasLimit")
+	gaslimit, err := operations.GetBlockGasLimit()
+	require.NoError(t, err)
+	require.Equal(t, uint64(30000000), gaslimit)
+	require.NoError(t, err)
+}
