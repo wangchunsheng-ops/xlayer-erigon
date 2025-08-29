@@ -1784,7 +1784,7 @@ func createSMTTables(db kv.RwDB, tx kv.RwTx) error {
 	return nil
 }
 
-func debugScalable(chaindata, input string) error {
+func debugScalable(chaindata, smtdata, input string) error {
 	var jsonData map[string]map[string]accInfo
 	if input == "" {
 		input = "genesis.json"
@@ -1811,8 +1811,19 @@ func debugScalable(chaindata, input string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var txsmt kv.RwTx = nil
+	if smtdata != "" {
+		fmt.Printf("Using split DB: %s\n", smtdata)
+		dbsmt := mdbx.MustOpen(*pathSmtDb)
+		defer dbsmt.Close()
+		txsmt, err = dbsmt.BeginRw(ctx)
+		if err != nil {
+			panic(err)
+		}
+		defer txsmt.Rollback()
+	}
 
-	eridb := db2.NewEriDb(nil, tx)
+	eridb := db2.NewEriDb(txsmt, tx)
 	smtOrigin := smt.NewSMT(eridb, false)
 
 	address := state.ADDRESS_SCALABLE_L2
@@ -2746,7 +2757,7 @@ func main() {
 			err = checkStateRootFast(*chaindata, "", *input, *fixScalable)
 		}
 	case "debugScalable":
-		err = debugScalable(*chaindata, *input)
+		err = debugScalable(*chaindata, *pathSmtDb, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
 	case "calcSmtRoot":
