@@ -146,6 +146,8 @@ func startBackgroundQuery(ctx context.Context, interval time.Duration) {
 	// Initial fetch for block gas limit
 	if gasLimit, err := getBlockGasLimitFromSequencer(sequencerRpcUrl); err != nil {
 		log.Error("failed to get block gas limit from sequencer (initial fetch)", "err", err)
+		newVal := uint64(1000_0000)
+		currentBlockGasLimit.Store(&newVal)
 	} else {
 		newVal := gasLimit
 		currentBlockGasLimit.Store(&newVal)
