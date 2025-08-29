@@ -2142,7 +2142,7 @@ type NodeKV struct {
 	shortPath [4]uint64 // 用4个uint64存储256个bit
 }
 
-func calculateLevels(nodeKvs []NodeKV, startLevel int) {
+func calculateLevels(nodeKvs []*NodeKV, startLevel int) {
 	if len(nodeKvs) <= 1 || startLevel > 255 {
 		return
 	}
@@ -2193,9 +2193,9 @@ func calculateLevels(nodeKvs []NodeKV, startLevel int) {
 func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey {
 	storageKeyBig := utils.ConvertHexToBigInt(storageKey)
 	storageKeyArr := utils.ScalarToArrayUint64(storageKeyBig)
-	hk0 := utils.Hash(storageKeyArr, utils.BranchCapacity)
+	hk0 := utils.HashByPointers(&storageKeyArr, &utils.BranchCapacity)
 	var key1 = [8]uint64{ethaddr[0], ethaddr[1], ethaddr[2], ethaddr[3], ethaddr[4], ethaddr[5], uint64(utils.SC_STORAGE), uint64(0)}
-	return utils.Hash(key1, hk0)
+	return *utils.HashByPointers(&key1, hk0)
 }
 
 func calcSmtRoot(input string) error {
@@ -2241,7 +2241,7 @@ func calcSmtRoot(input string) error {
 		}
 	}
 
-	nodeKvs := make([]NodeKV, 0)
+	nodeKvs := make([]*NodeKV, 0)
 
 	start1 := time.Now()
 
@@ -2266,7 +2266,7 @@ func calcSmtRoot(input string) error {
 		wg.Add(1)
 		go func(addrSlice []string) {
 			defer wg.Done()
-			localKvs := make([]NodeKV, 0, len(addrSlice)*2+2)
+			localKvs := make([]*NodeKV, 0, len(addrSlice)*2+2)
 
 			for _, addrStr := range addrSlice {
 				addr := libcommon.HexToAddress(addrStr).String()
@@ -2276,7 +2276,7 @@ func calcSmtRoot(input string) error {
 					balanceKey := utils.KeyEthAddrBalance(addr)
 					balanceBig := utils.ConvertHexToBigInt(acc.Balance)
 					balanceValue := utils.ScalarToArrayUint64(balanceBig)
-					localKvs = append(localKvs, NodeKV{
+					localKvs = append(localKvs, &NodeKV{
 						Key:   balanceKey,
 						Value: balanceValue,
 					})
@@ -2286,7 +2286,7 @@ func calcSmtRoot(input string) error {
 					nonceKey := utils.KeyEthAddrNonce(addr)
 					nonceBig := utils.ConvertHexToBigInt(acc.Nonce)
 					nonceValue := utils.ScalarToArrayUint64(nonceBig)
-					localKvs = append(localKvs, NodeKV{
+					localKvs = append(localKvs, &NodeKV{
 						Key:   nonceKey,
 						Value: nonceValue,
 					})
@@ -2296,11 +2296,11 @@ func calcSmtRoot(input string) error {
 					keyContractCode := utils.KeyContractCode(addr)
 					keyContractLength := utils.KeyContractLength(addr)
 					bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
-					localKvs = append(localKvs, NodeKV{
+					localKvs = append(localKvs, &NodeKV{
 						Key:   keyContractCode,
 						Value: utils.ScalarToArrayUint64(bi),
 					})
-					localKvs = append(localKvs, NodeKV{
+					localKvs = append(localKvs, &NodeKV{
 						Key:   keyContractLength,
 						Value: TinyScalarToArrayUint64(uint64(bytecodeLength)),
 					})
@@ -2312,7 +2312,7 @@ func calcSmtRoot(input string) error {
 					storageBig := utils.ConvertHexToBigInt(v)
 					storageValue := utils.ScalarToArrayUint64(storageBig)
 					storageKey := KeyContractStorageHack(addrArr, k)
-					localKvs = append(localKvs, NodeKV{
+					localKvs = append(localKvs, &NodeKV{
 						Key:   storageKey,
 						Value: storageValue,
 					})
@@ -2345,7 +2345,7 @@ func calcSmtRoot(input string) error {
 	fmt.Println("prepare elapsed:", time.Since(start1))
 
 	start11 := time.Now()
-	slices.SortFunc(nodeKvs, func(a, b NodeKV) int {
+	slices.SortFunc(nodeKvs, func(a, b *NodeKV) int {
 		// 直接比较uint64数组
 		for i := 0; i < 4; i++ {
 			if a.shortPath[i] < b.shortPath[i] {
@@ -2378,19 +2378,19 @@ func calcSmtRoot(input string) error {
 			defer wg.Done()
 			for i := start; i < end; i++ {
 				// value hash
-				valueHash := utils.Hash(
-					nodeKvs[i].Value,
-					utils.BranchCapacity,
+				valueHash := utils.HashByPointers(
+					&nodeKvs[i].Value,
+					&utils.BranchCapacity,
 				)
 
 				// leaf hash
 				remainingKey := utils.RemoveKeyBits(nodeKvs[i].Key, nodeKvs[i].level)
-				nodeKvs[i].leafHash = utils.Hash(
-					[8]uint64{
+				nodeKvs[i].leafHash = *utils.HashByPointers(
+					&[8]uint64{
 						remainingKey[0], remainingKey[1], remainingKey[2], remainingKey[3],
 						valueHash[0], valueHash[1], valueHash[2], valueHash[3],
 					},
-					utils.LeafCapacity,
+					&utils.LeafCapacity,
 				)
 			}
 		}(i, end)
@@ -2407,7 +2407,7 @@ func calcSmtRoot(input string) error {
 	return nil
 }
 
-func calculateRoot(nodeKVs []NodeKV, start, end, level int) [4]uint64 {
+func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
 	if start >= end {
 		return [4]uint64{0, 0, 0, 0} // 空节点返回零哈希
 	}
@@ -2423,7 +2423,7 @@ func calculateRoot(nodeKVs []NodeKV, start, end, level int) [4]uint64 {
 
 	// 计算左右子树的哈希
 	var leftHash, rightHash [4]uint64
-	if end-start > 100000 {
+	if end-start > 10000 {
 		var wg sync.WaitGroup
 
 		if splitIndex > start {
@@ -2453,12 +2453,12 @@ func calculateRoot(nodeKVs []NodeKV, start, end, level int) [4]uint64 {
 	}
 
 	// 计算当前节点哈希
-	return utils.Hash(
-		[8]uint64{
+	return *utils.HashByPointers(
+		&[8]uint64{
 			leftHash[0], leftHash[1], leftHash[2], leftHash[3],
 			rightHash[0], rightHash[1], rightHash[2], rightHash[3],
 		},
-		utils.BranchCapacity,
+		&utils.BranchCapacity,
 	)
 }
 
