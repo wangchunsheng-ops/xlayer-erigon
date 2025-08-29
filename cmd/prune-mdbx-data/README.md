@@ -66,7 +66,7 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 ./prune-tool compact-db -source /path/to/datadir/chaindata -output /path/to/datadir/chaindata.compact
 
 # Compact SMT database in-place (recommended for large SMT databases)
-./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
+./prune-tool compact-db -source /path/to/datadir/smt -in-place
 ```
 
 ## Optimal Workflow
@@ -81,7 +81,7 @@ This tool suite addresses the unique challenges of managing X Layer zkEVM node d
 
 # Step 3: Compact databases in-place (automated replacement)
 ./prune-tool compact-db -source /path/to/datadir/chaindata -in-place
-./prune-tool compact-db -source /path/to/datadir/smt -in-place -type smt
+./prune-tool compact-db -source /path/to/datadir/smt -in-place
 
 # Step 4: Verify results
 ./prune-tool list-tables /path/to/datadir > after.txt
@@ -166,25 +166,23 @@ Analyzes database structure and provides detailed statistics.
 - `-output <path>`: Output path (required for copy mode only)
 - `-in-place`: Compact and replace original database  
 - `-backup`: Create backup before in-place replacement (default: false)
-- `-type <chaindata|smt>`: Database type (default: chaindata)
 - `-dry-run`: Show analysis without performing compaction
 
 **Examples:**
 ```bash
-# Analyze potential savings (recommended first step)
+# Analyze potential savings (auto-detects database type)
 ./prune-tool compact-db -source ./datadir/chaindata -dry-run
+./prune-tool compact-db -source ./datadir/smt -dry-run
 
 # In-place compaction (fast, no backup - default behavior)
 ./prune-tool compact-db -source ./datadir/chaindata -in-place
+./prune-tool compact-db -source ./datadir/smt -in-place
 
 # In-place compaction with backup (safer but uses more space)
 ./prune-tool compact-db -source ./datadir/chaindata -in-place -backup
 
 # Copy mode compaction (if you prefer manual control)
 ./prune-tool compact-db -source ./datadir/chaindata -output ./datadir/chaindata.compact
-
-# SMT database in-place compaction
-./prune-tool compact-db -source ./datadir/smt -in-place -type smt
 ```
 
 ## Expected Space Savings
