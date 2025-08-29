@@ -2153,20 +2153,40 @@ func calculateLevels(nodeKvs []NodeKV, startLevel int) {
 	})
 
 	if splitIndex == 0 {
-		// All nodes belong to the right subtree. So we treat the right subtree as the main tree.
+		// All nodes belong to the right subtree
 		calculateLevels(nodeKvs, startLevel+1)
 	} else if splitIndex == len(nodeKvs) {
-		// All nodes belong to the left subtree. So we treat the left subtree as the main tree.
+		// All nodes belong to the left subtree
 		calculateLevels(nodeKvs, startLevel+1)
 	} else {
-		// Both left subtree and right subtree have node(s), so we should create a parent node for two subtrees.
-		// That also means we should increase the level by 1 for all nodes.
+		// Both left subtree and right subtree have node(s)
 		for i := range nodeKvs {
 			nodeKvs[i].level = startLevel + 1
 		}
-		// recursive process the subtrees
-		calculateLevels(nodeKvs[:splitIndex], startLevel+1)
-		calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+
+		// 只在数据量足够大时才启用并发
+		if len(nodeKvs) > 100000 {
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// 并发处理左子树
+			go func() {
+				defer wg.Done()
+				calculateLevels(nodeKvs[:splitIndex], startLevel+1)
+			}()
+
+			// 并发处理右子树
+			go func() {
+				defer wg.Done()
+				calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+			}()
+
+			wg.Wait()
+		} else {
+			// 数据量小时顺序处理
+			calculateLevels(nodeKvs[:splitIndex], startLevel+1)
+			calculateLevels(nodeKvs[splitIndex:], startLevel+1)
+		}
 	}
 }
 
