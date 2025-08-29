@@ -70,7 +70,7 @@ func (api *RealtimeAPIImpl) GetBlockReceipts(ctx context.Context, number rpc.Blo
 		return api.APIImpl.GetBlockReceipts(ctx, number)
 	}
 
-	header, _, blockhash, ok := api.cacheDB.Stateless.GetHeader(blockNum)
+	header, _, blockhash, _, _, ok := api.cacheDB.Stateless.GetBlockInfo(blockNum)
 	if !ok {
 		return api.APIImpl.GetBlockReceipts(ctx, number)
 	}

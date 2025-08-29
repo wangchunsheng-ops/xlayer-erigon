@@ -50,7 +50,7 @@ func (cache *StatelessCache) GetTxInfo(txHash libcommon.Hash) (ethTypes.Transact
 }
 
 func (cache *StatelessCache) GetBlockTxs(blockNum uint64) ([]libcommon.Hash, bool) {
-	if _, _, _, ok := cache.blockInfoMap.Get(blockNum); !ok {
+	if _, _, _, _, _, ok := cache.blockInfoMap.Get(blockNum); !ok {
 		return nil, false
 	}
 	return cache.txInfoMap.GetBlockTxs(blockNum), true
