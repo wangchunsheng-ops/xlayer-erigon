@@ -92,6 +92,7 @@ var (
 	ignoreScalable  = flag.Bool("ignore-scalable", false, "ignore scalable account")
 	deleteScalable  = flag.Bool("delete-scalable", false, "delete scalable account")
 	debugPrint      = flag.Bool("debugPrint", false, "print debug info")
+	fixScalable     = flag.Bool("fix-scalable", false, "fix scalable account")
 )
 
 func dbSlice(chaindata string, bucket string, prefix []byte) {
@@ -1783,7 +1784,7 @@ func createSMTTables(db kv.RwDB, tx kv.RwTx) error {
 	return nil
 }
 
-func checkStateRoot2(chaindata, input string) error {
+func debugScalable(chaindata, input string) error {
 	var jsonData map[string]map[string]accInfo
 	if input == "" {
 		input = "genesis.json"
@@ -1837,6 +1838,50 @@ func checkStateRoot2(chaindata, input string) error {
 
 	fmt.Println("total elapsed:", time.Since(start))
 
+	return nil
+}
+
+func checkStateRootFast(chaindata, smtdata, input string, fixScalable bool) error {
+
+	ctx := context.Background()
+	db := mdbx.MustOpen(chaindata)
+	defer db.Close()
+	tx, err := db.BeginRw(ctx)
+	if err != nil {
+		panic(err)
+	}
+	defer tx.Rollback()
+	var txsmt kv.RwTx = nil
+	if smtdata != "" {
+		fmt.Printf("Using split DB: %s\n", smtdata)
+		dbsmt := mdbx.MustOpen(*pathSmtDb)
+		defer dbsmt.Close()
+		txsmt, err = dbsmt.BeginRw(ctx)
+		if err != nil {
+			panic(err)
+		}
+	}
+	if txsmt != nil {
+		defer txsmt.Rollback()
+	}
+
+	eridb := db2.NewEriDb(txsmt, tx)
+	smtOrigin := smt.NewSMT(eridb, false)
+
+	smtBatchRootHashOrigin := smtOrigin.LastRoot()
+	fmt.Printf("*** smtBatchRootHashOrigin: %x\n", smtBatchRootHashOrigin)
+
+	root, err := calcSmtRoot(input, fixScalable)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("*** smtBatchRootHashRebuild: %x\n", root)
+
+	if smtBatchRootHashOrigin.String() == root.String() {
+		fmt.Println("check passed !!")
+	} else {
+		fmt.Println("check failed...")
+	}
 	return nil
 }
 
@@ -2198,7 +2243,7 @@ func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey 
 	return *utils.HashByPointers(&key1, hk0)
 }
 
-func calcSmtRoot(input string) error {
+func calcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
 	start00 := time.Now()
 	defer func() {
 		fmt.Println("total elapsed:", time.Since(start00))
@@ -2213,18 +2258,18 @@ func calcSmtRoot(input string) error {
 	if err != nil {
 		if !os.IsNotExist(err) {
 			fmt.Println("Error reading file:", err)
-			return err
+			return nil, err
 		}
 	} else {
 		if err := json.Unmarshal(fileData, &jsonData); err != nil {
 			fmt.Println("Error decoding JSON:", err)
-			return err
+			return nil, err
 		}
 	}
 
 	alloc := jsonData["alloc"]
 
-	if _, ok := jsonData["alloc"]; ok {
+	if _, ok := jsonData["alloc"]; ok && fixScalable {
 		if _, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"]; ok {
 			if v, ok := jsonData["alloc"]["000000000000000000000000000000005ca1ab1e"].Storage["0x0000000000000000000000000000000000000000000000000000000000000002"]; ok {
 				fmt.Println("key:", "0x0000000000000000000000000000000000000000000000000000000000000002", v, " ===> 0x0000000000000000000000000000000000000000000000000000000068ad8a02")
@@ -2451,9 +2496,18 @@ func calcSmtRoot(input string) error {
 	root := utils.NodeKey(calculateRoot(nodeKvs, 0, len(nodeKvs), 0))
 	fmt.Println("calculate root hash elapsed:", time.Since(start4))
 
-	fmt.Println("root: ", utils.ConvertBigIntToHex(root.ToBigInt()))
+	return root.ToBigInt(), nil
+}
 
-	return nil
+func CalcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
+	root, err := calcSmtRoot(input, fixScalable)
+	if err != nil {
+		fmt.Println("calc smt root error:", err)
+		return nil, err
+	}
+
+	fmt.Printf("*** smtBatchRootHashRebuild: %x\n", root)
+	return root, nil
 }
 
 func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
@@ -2685,12 +2739,18 @@ func main() {
 		} else {
 			err = checkStateRoot(*chaindata, "", *input, *incremental, *debugPrint)
 		}
-	case "checkStateRoot2":
-		err = checkStateRoot2(*chaindata, *input)
+	case "checkStateRootFast":
+		if *standaloneSmtDb {
+			err = checkStateRootFast(*chaindata, *pathSmtDb, *input, *fixScalable)
+		} else {
+			err = checkStateRootFast(*chaindata, "", *input, *fixScalable)
+		}
+	case "debugScalable":
+		err = debugScalable(*chaindata, *input)
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
 	case "calcSmtRoot":
-		err = calcSmtRoot(*input)
+		_, err = CalcSmtRoot(*input, *fixScalable)
 	default:
 		fmt.Printf("Unknown action: %s\n", *action)
 		return
