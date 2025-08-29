@@ -2139,7 +2139,7 @@ type NodeKV struct {
 	leafHash  [4]uint64
 	level     int // [0, 255]
 	path      []int
-	shortPath [4]uint64 // 用4个uint64存储256个bit
+	shortPath [4]uint64 // Store 256 bits using 4 uint64s
 }
 
 func calculateLevels(nodeKvs []*NodeKV, startLevel int) {
@@ -2164,18 +2164,18 @@ func calculateLevels(nodeKvs []*NodeKV, startLevel int) {
 			nodeKvs[i].level = startLevel + 1
 		}
 
-		// 只在数据量足够大时才启用并发
-		if len(nodeKvs) > 100000 {
+		// Enable concurrent processing only when data size is large enough
+		if len(nodeKvs) > 10000 {
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			// 并发处理左子树
+			// Process left subtree concurrently
 			go func() {
 				defer wg.Done()
 				calculateLevels(nodeKvs[:splitIndex], startLevel+1)
 			}()
 
-			// 并发处理右子树
+			// Process right subtree concurrently
 			go func() {
 				defer wg.Done()
 				calculateLevels(nodeKvs[splitIndex:], startLevel+1)
@@ -2183,7 +2183,7 @@ func calculateLevels(nodeKvs []*NodeKV, startLevel int) {
 
 			wg.Wait()
 		} else {
-			// 数据量小时顺序处理
+			// Process sequentially when data size is small
 			calculateLevels(nodeKvs[:splitIndex], startLevel+1)
 			calculateLevels(nodeKvs[splitIndex:], startLevel+1)
 		}
@@ -2245,7 +2245,7 @@ func calcSmtRoot(input string) error {
 
 	start1 := time.Now()
 
-	// 获取所有地址并分片处理
+	// Get all addresses and process them in chunks
 	addrs := make([]string, 0, len(alloc))
 	for addr := range alloc {
 		addrs = append(addrs, addr)
@@ -2307,13 +2307,13 @@ func calcSmtRoot(input string) error {
 				}
 
 				if len(acc.Storage) > 100000 {
-					// 将 storage 转换为切片以便分片
+					// Convert storage to slice for parallel processing
 					storageKeys := make([]string, 0, len(acc.Storage))
 					for k := range acc.Storage {
 						storageKeys = append(storageKeys, k)
 					}
 
-					// 计算每个 worker 处理的数量
+					// Calculate chunk size for each worker
 					numStorageWorkers := runtime.NumCPU()
 					storageChunkSize := (len(storageKeys) + numStorageWorkers - 1) / numStorageWorkers
 
@@ -2322,7 +2322,7 @@ func calcSmtRoot(input string) error {
 					addrBig := utils.ConvertHexToBigInt(addr)
 					addrArr := utils.ScalarToArrayUint64(addrBig)
 
-					// 并发处理 storage
+					// Process storage concurrently
 					for i := 0; i < len(storageKeys); i += storageChunkSize {
 						end := i + storageChunkSize
 						if end > len(storageKeys) {
@@ -2353,7 +2353,7 @@ func calcSmtRoot(input string) error {
 
 					storageWg.Wait()
 				} else {
-					// storage 数量较少时顺序处理
+					// Process storage sequentially when size is small
 					addrBig := utils.ConvertHexToBigInt(addr)
 					addrArr := utils.ScalarToArrayUint64(addrBig)
 					for k, v := range acc.Storage {
@@ -2368,22 +2368,22 @@ func calcSmtRoot(input string) error {
 				}
 			}
 
-			// 计算路径和shortPath
+			// Calculate path and shortPath
 			for i := range localKvs {
 				localKvs[i].path = localKvs[i].Key.GetPath()
-				// 将path转换为shortPath
+				// Convert path to shortPath
 				for j := 0; j < 256; j++ {
 					if localKvs[i].path[j] == 1 {
-						// 设置对应的bit为1
-						// j=0 应该对应最高位，所以是 63-(j%64)
-						blockIdx := j / 64      // 决定是哪个uint64
-						bitPos := 63 - (j % 64) // 在这个uint64中的位置，从高位开始
+						// Set corresponding bit to 1
+						// j=0 should map to highest bit, so use 63-(j%64)
+						blockIdx := j / 64      // Determine which uint64
+						bitPos := 63 - (j % 64) // Position in this uint64, starting from highest bit
 						localKvs[i].shortPath[blockIdx] |= uint64(1) << uint64(bitPos)
 					}
 				}
 			}
 
-			// 合并结果
+			// Merge results
 			mu.Lock()
 			nodeKvs = append(nodeKvs, localKvs...)
 			mu.Unlock()
@@ -2395,7 +2395,7 @@ func calcSmtRoot(input string) error {
 
 	start11 := time.Now()
 	slices.SortFunc(nodeKvs, func(a, b *NodeKV) int {
-		// 直接比较uint64数组
+		// Directly compare uint64 arrays
 		for i := 0; i < 4; i++ {
 			if a.shortPath[i] < b.shortPath[i] {
 				return -1
@@ -2413,7 +2413,7 @@ func calcSmtRoot(input string) error {
 	fmt.Println("calculate level elapsed:", time.Since(start2))
 
 	start3 := time.Now()
-	// 2. 并发计算所有叶子节点的哈希
+	// 2. Calculate leaf node hashes concurrently
 	chunkSize = (len(nodeKvs) + numWorkers - 1) / numWorkers
 
 	for i := 0; i < len(nodeKvs); i += chunkSize {
@@ -2458,19 +2458,19 @@ func calcSmtRoot(input string) error {
 
 func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
 	if start >= end {
-		return [4]uint64{0, 0, 0, 0} // 空节点返回零哈希
+		return [4]uint64{0, 0, 0, 0} // Return zero hash for empty node
 	}
 
 	if start+1 == end {
-		return nodeKVs[start].leafHash // 单个节点返回其叶子哈希
+		return nodeKVs[start].leafHash // Return leaf hash for single node
 	}
 
-	// 找到分界点
+	// Find the split point
 	splitIndex := sort.Search(end-start, func(i int) bool {
 		return nodeKVs[start+i].path[level] == 1
 	}) + start
 
-	// 计算左右子树的哈希
+	// Calculate hashes for left and right subtrees
 	var leftHash, rightHash [4]uint64
 	if end-start > 10000 {
 		var wg sync.WaitGroup
@@ -2501,7 +2501,7 @@ func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
 		}
 	}
 
-	// 计算当前节点哈希
+	// Calculate hash for current node
 	return *utils.HashByPointers(
 		&[8]uint64{
 			leftHash[0], leftHash[1], leftHash[2], leftHash[3],
