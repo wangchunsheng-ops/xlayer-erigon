@@ -2008,6 +2008,8 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 					if valInSmtHex != v {
 						fmt.Printf("key: %s, valInSmt: %s ===> valInGenesise: %s \n", k, valInSmtHex, v)
 						storageChanges[address][k] = valInSmtHex
+					} else {
+						storageChanges[address][k] = v
 					}
 				}
 			}
@@ -2361,7 +2363,7 @@ func calcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
 					})
 				}
 
-				if !isEmpty(acc.Code) {
+				if !isEmptyCode(acc.Code) {
 					keyContractCode := utils.KeyContractCode(addr)
 					keyContractLength := utils.KeyContractLength(addr)
 					bi, bytecodeLength, _ := smt.HackWrapConvertBytecodeToBigInt(acc.Code)
@@ -2375,7 +2377,7 @@ func calcSmtRoot(input string, fixScalable bool) (*big.Int, error) {
 					})
 				}
 
-				if len(acc.Storage) > 100000 {
+				if len(acc.Storage) > 50000 {
 					// Convert storage to slice for parallel processing
 					storageKeys := make([]string, 0, len(acc.Storage))
 					for k := range acc.Storage {
@@ -2591,6 +2593,10 @@ func calculateRoot(nodeKVs []*NodeKV, start, end, level int) [4]uint64 {
 
 func isEmpty(s string) bool {
 	return s == "" || s == "0x0"
+}
+
+func isEmptyCode(s string) bool {
+	return s == "" || s == "0x"
 }
 
 func getSmtroot(chaindata string) error {
