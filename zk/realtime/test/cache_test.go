@@ -240,6 +240,7 @@ func TestTxInfoMap(t *testing.T) {
 			assert.Contains(t, txHashes, hash)
 		}
 
+		tm.Delete(blockNumber)
 		for i := 0; i < goroutines; i++ {
 			hash := common.BytesToHash([]byte{byte(i), byte(i >> 8), byte(i >> 16), byte(i >> 24)})
 			_, _, _, _, exists := tm.GetTx(hash)

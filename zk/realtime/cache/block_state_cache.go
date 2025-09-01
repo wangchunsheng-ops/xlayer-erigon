@@ -15,35 +15,59 @@ import (
 	"github.com/ledgerwatch/log/v3"
 )
 
-// BlockStateCache implements the plain state reader with a changeset cache layer.
-// The block state cache holds the block chainstate, and the previous block state
-// cache reader.
+// BlockStateCache is a double-linked list that implements the plain state reader
+// with a changeset cache layer. The block state cache holds the block chainstate,
+// and the previous block state cache reader.
 type BlockStateCache struct {
-	height    uint64
-	prevCache state.StateReader
-	nextFlag  atomic.Bool
+	height         uint64
+	nextBlockCache *BlockStateCache
+	prevCache      state.StateReader
+	isPrevGlobal   atomic.Bool
 
 	cacheLock sync.RWMutex
 	cache     *plainStateCache
 }
 
-func NewBlockStateCache(height uint64, stateReader state.StateReader, size int) *BlockStateCache {
+func NewBlockStateCache(height uint64, size int) *BlockStateCache {
 	return &BlockStateCache{
-		height:    height,
-		prevCache: stateReader,
-		cache:     newPlainStateCache(size),
-		nextFlag:  atomic.Bool{},
+		height:         height,
+		nextBlockCache: nil,
+		prevCache:      nil,
+		isPrevGlobal:   atomic.Bool{},
+		cache:          newPlainStateCache(size),
 	}
 }
 
-func (cache *BlockStateCache) AddGlobalStateReader(globalStateReader state.StateReader) {
+// -------------- Linked list operations --------------
+func (cache *BlockStateCache) SetNextBlockCache(nextBlockCache *BlockStateCache) {
+	cache.cacheLock.Lock()
+	defer cache.cacheLock.Unlock()
+	cache.nextBlockCache = nextBlockCache
+}
+
+func (cache *BlockStateCache) SetPrevStateReader(stateReader state.StateReader, isGlobal bool) {
+	cache.cacheLock.Lock()
+	defer cache.cacheLock.Unlock()
+	cache.prevCache = stateReader
+	cache.isPrevGlobal.Store(isGlobal)
+}
+
+func (cache *BlockStateCache) Clear() {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
-	cache.prevCache = globalStateReader
-	cache.nextFlag.Store(true)
+	// Clear the plain state cache
+	cache.cache.Clear()
+
+	// Clear linked list references to prevent circular references
+	cache.nextBlockCache = nil
+	cache.prevCache = nil
+
+	// Reset flags
+	cache.isPrevGlobal.Store(false)
 }
 
+// -------------- State apply operations --------------
 func (cache *BlockStateCache) ApplyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()

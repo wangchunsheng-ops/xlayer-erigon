@@ -420,6 +420,7 @@ func (rc *RealtimeClient) EthGetTokenBalance(
 	ctx context.Context,
 	addr common.Address,
 	erc20Addr common.Address,
+	height *big.Int,
 ) (*big.Int, error) {
 	// Pack the balanceOf function call
 	data, err := erc20ABI.Pack("balanceOf", addr)
@@ -431,7 +432,7 @@ func (rc *RealtimeClient) EthGetTokenBalance(
 	result, err := rc.CallContract(ctx, ethereum.CallMsg{
 		To:   &erc20Addr,
 		Data: data,
-	}, nil)
+	}, height)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call contract: %v", err)
 	}

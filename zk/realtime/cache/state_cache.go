@@ -53,7 +53,8 @@ func (cache *StateCache) Clear() {
 	defer cache.cacheLock.Unlock()
 
 	// Clear block state caches
-	for blockNum := range cache.blocksCache {
+	for blockNum, bc := range cache.blocksCache {
+		bc.Clear()
 		delete(cache.blocksCache, blockNum)
 	}
 
@@ -79,46 +80,59 @@ func (cache *StateCache) GetStateReaderWithHeight(blockNum uint64) (state.StateR
 	}
 }
 
-func (cache *StateCache) AddBlock(blockNum uint64, blockStateCache *BlockStateCache) {
+func (cache *StateCache) AddBlock(blockNum uint64, blockStateCache *BlockStateCache) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
+	_, exists := cache.blocksCache[blockNum]
+	if exists {
+		return fmt.Errorf("block %d already exists in the confirmed block state cache", blockNum)
+	}
 	cache.blocksCache[blockNum] = blockStateCache
+	return nil
 }
 
 func (cache *StateCache) FlushBlock(blockNum uint64) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
-	bc, exists := cache.blocksCache[blockNum]
-	if !exists {
+	if blockNum <= cache.globalHeight {
 		return nil
 	}
-	// Ensure ordering
-	if bc.nextFlag.Load() {
-		return fmt.Errorf("block %d is not the next block to be flushed", blockNum)
+
+	flushHeight := cache.globalHeight + 1
+	if flushHeight != blockNum {
+		return fmt.Errorf("block %d is not the next block to flush, global cache height: %d", blockNum, cache.globalHeight)
+	}
+
+	bc, exists := cache.blocksCache[blockNum]
+	if !exists {
+		return fmt.Errorf("failed to flush block %d, block state cache not found in state cache. global cache height: %d", blockNum, cache.globalHeight)
+	}
+
+	if !bc.isPrevGlobal.Load() && cache.globalHeight == blockNum-1 {
+		return fmt.Errorf("failed to flush block %d, previous state reader is not global. global cache height: %d", blockNum, cache.globalHeight)
 	}
 
 	// Flush global cache
 	cache.globalCache.FlushState(bc.cache)
 	cache.globalHeight = blockNum
 
-	// Update next block state cache
-	nbc, exists := cache.blocksCache[blockNum+1]
-	if exists {
-		// Switch next block state cache to global cache
-		nbc.AddGlobalStateReader(cache.globalCache)
+	// Update linked list
+	nbc := bc.nextBlockCache
+	if nbc != nil {
+		nbc.SetPrevStateReader(cache.globalCache, true)
 	}
+
+	// Remove from map
 	delete(cache.blocksCache, blockNum)
+	bc.Clear()
 
 	return nil
 }
 
 // -------------- Debug operations --------------
 func (cache *StateCache) DebugDumpToFile(cacheDumpPath string) error {
-	cache.cacheLock.RLock()
-	defer cache.cacheLock.RUnlock()
-
 	flatten, err := cache.flattenState()
 	if err != nil {
 		return err
@@ -164,9 +178,6 @@ func (cache *StateCache) DebugDumpToFile(cacheDumpPath string) error {
 // DebugCompare compares the state cache with the chain-state db, and returns the
 // list of account addresses that have differing states.
 func (cache *StateCache) DebugCompare(reader state.StateReader) ([]string, error) {
-	cache.cacheLock.RLock()
-	defer cache.cacheLock.RUnlock()
-
 	flatten, err := cache.flattenState()
 	if err != nil {
 		return nil, err

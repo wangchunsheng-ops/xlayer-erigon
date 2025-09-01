@@ -132,8 +132,8 @@ func (api *RealtimeAPIImpl) createStateReader(blockNrOrHash *rpc.BlockNumberOrHa
 
 	pendingHeight := api.cacheDB.GetPendingHeight()
 	if *blockNrOrHash.BlockNumber == rpc.PendingBlockNumber || *blockNrOrHash.BlockNumber == rpc.BlockNumber(pendingHeight) {
-		pendingReader := api.cacheDB.GetPendingStateCache()
-		if pendingReader != nil {
+		pendingReader, err := api.cacheDB.GetPendingStateCache()
+		if pendingReader != nil && err == nil {
 			return pendingReader, pendingHeight, nil
 		}
 		// Case where no pending block is open yet, or pending block was confirmed. Use latest confirmed state reader
