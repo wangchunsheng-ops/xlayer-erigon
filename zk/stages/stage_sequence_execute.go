@@ -939,7 +939,7 @@ BatchLoop:
 	metrics.GetLogStatistics().CumulativeTiming(metrics.BatchCommitDBTiming, time.Since(startCommitTime))
 
 	batchTime := time.Since(batchStart)
-	metrics.BatchExecuteTime(string(batchCloseReason), batchTime)
+	metrics.BatchExecuteTiming(string(batchCloseReason), batchTime)
 
 	return err
 }
