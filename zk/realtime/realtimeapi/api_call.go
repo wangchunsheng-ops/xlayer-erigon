@@ -22,15 +22,9 @@ import (
 
 // Call implements the realtime eth_call.
 // Executes a new message call immediately without creating a transaction on the block chain.
-// Realtime API supports execution on the latest, pending, and specified block.
+// Note that realtime API only supports execution on the latest block.
 func (api *RealtimeAPIImpl) Call(ctx context.Context, args ethapi2.CallArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *ethapi2.StateOverrides) (hexutility.Bytes, error) {
 	if api.cacheDB == nil || !api.cacheDB.ReadyFlag.Load() {
-		return api.APIImpl.Call(ctx, args, blockNrOrHash, overrides)
-	}
-
-	// If the block number is lower than the execution height, use the default call.
-	blockHeight, err := api.getBlockNumberOrHash(blockNrOrHash)
-	if err != nil && blockHeight > 0 && blockHeight <= api.cacheDB.GetExecutionHeight() {
 		return api.APIImpl.Call(ctx, args, blockNrOrHash, overrides)
 	}
 
@@ -111,13 +105,6 @@ func (api *RealtimeAPIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi.C
 	if blockNrOrHash != nil {
 		bNrOrHash = *blockNrOrHash
 	}
-
-	// If the block number is lower than the execution height, use the default estimate gas.
-	blockHeight, err := api.getBlockNumberOrHash(bNrOrHash)
-	if err != nil && blockHeight > 0 && blockHeight <= api.cacheDB.GetExecutionHeight() {
-		return api.APIImpl.EstimateGas(ctx, argsOrNil, blockNrOrHash)
-	}
-
 	stateReader, blockNumber, err := api.createStateReader(&bNrOrHash)
 	if err != nil || stateReader == nil {
 		return api.APIImpl.EstimateGas(ctx, argsOrNil, blockNrOrHash)
