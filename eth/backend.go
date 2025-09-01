@@ -256,15 +256,14 @@ type Ethereum struct {
 	l1BlockSyncer    *syncer.L1Syncer
 
 	// For X Layer, realtime
-	kafkaEnabled           bool
-	kafkaProducer          *realtimeKafka.KafkaProducer
-	kafkaConsumer          *realtimeKafka.KafkaConsumer
-	realtimeCache          *realtimeCache.RealtimeCache
-	newBlockInfoChan       chan *realtimeTypes.HeaderWithChangeset
-	confirmedBlockInfoChan chan *realtimeTypes.BlockWithChangeset
-	txInfoChan             chan state.TxInfo
-	finishChan             chan realtimeTypes.FinishedEntry
-	realtimeSub            *realtimeSub.RealtimeSubscription
+	kafkaEnabled       bool
+	kafkaProducer      *realtimeKafka.KafkaProducer
+	kafkaConsumer      *realtimeKafka.KafkaConsumer
+	realtimeCache      *realtimeCache.RealtimeCache
+	kafkaBlockInfoChan chan *realtimeTypes.BlockInfo
+	kafkaTxInfoChan    chan state.TxInfo
+	finishChan         chan realtimeTypes.FinishedEntry
+	realtimeSub        *realtimeSub.RealtimeSubscription
 }
 
 func splitAddrIntoHostAndPort(addr string) (host string, port int, err error) {
@@ -1244,9 +1243,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				} else {
 					backend.kafkaEnabled = true
 					backend.kafkaProducer = kafkaProducer
-					backend.newBlockInfoChan = make(chan *realtimeTypes.HeaderWithChangeset, realtimeKafka.DefaultKafkaBufferSize)
-					backend.confirmedBlockInfoChan = make(chan *realtimeTypes.BlockWithChangeset, realtimeKafka.DefaultKafkaBufferSize)
-					backend.txInfoChan = make(chan state.TxInfo, realtimeKafka.DefaultKafkaBufferSize)
+					backend.kafkaBlockInfoChan = make(chan *realtimeTypes.BlockInfo, realtimeKafka.DefaultKafkaBufferSize)
+					backend.kafkaTxInfoChan = make(chan state.TxInfo, realtimeKafka.DefaultKafkaBufferSize)
 
 					// Send error trigger message on sequencer restart
 					if err := backend.kafkaProducer.SendKafkaErrorTrigger(0); err != nil {
@@ -1275,9 +1273,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 				backend.txPool2DB,
 				l1InfoTreeUpdater,
 				hook,
-				backend.newBlockInfoChan,
-				backend.confirmedBlockInfoChan,
-				backend.txInfoChan,
+				backend.kafkaBlockInfoChan,
+				backend.kafkaTxInfoChan,
 			)
 
 			backend.syncUnwindOrder = zkStages.ZkSequencerUnwindOrder
@@ -2120,7 +2117,7 @@ func (s *Ethereum) Start() error {
 		// For X Layer, realtime
 		if s.config.Zk.XLayer.Realtime.Enable && s.kafkaEnabled {
 			go realtime.ListenKafkaConsumer(s.sentryCtx, s.kafkaConsumer, s.realtimeCache, s.finishChan, s.realtimeSub)
-			go realtime.ListenKafkaProducer(s.sentryCtx, s.kafkaProducer, s.newBlockInfoChan, s.confirmedBlockInfoChan, s.txInfoChan)
+			go realtime.ListenKafkaProducer(s.sentryCtx, s.kafkaProducer, s.kafkaBlockInfoChan, s.kafkaTxInfoChan)
 		}
 	}
 

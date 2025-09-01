@@ -1,13 +1,11 @@
 package types
 
 import (
-	"fmt"
 	"path/filepath"
 	"sync"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	ethTypes "github.com/ledgerwatch/erigon/core/types"
-	"github.com/ledgerwatch/erigon/zkevm/log"
 )
 
 type BlockInfoMap struct {
@@ -23,14 +21,14 @@ func NewBlockInfoMap(size int) *BlockInfoMap {
 	}
 }
 
-func (bm *BlockInfoMap) Get(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, *Changeset, *Changeset, bool) {
+func (bm *BlockInfoMap) Get(blockNum uint64) (*ethTypes.Header, int64, libcommon.Hash, bool) {
 	bm.mu.RLock()
 	defer bm.mu.RUnlock()
 	blockInfo, exists := bm.blockInfos[blockNum]
 	if exists {
-		return blockInfo.Header, blockInfo.TxCount, blockInfo.Hash, blockInfo.StartBlockChangeset, blockInfo.CloseBlockChangeset, true
+		return blockInfo.Header, blockInfo.TxCount, blockInfo.Hash, true
 	}
-	return nil, 0, libcommon.Hash{}, nil, nil, exists
+	return nil, 0, libcommon.Hash{}, exists
 }
 
 func (bm *BlockInfoMap) GetBlockNumberByHash(blockHash libcommon.Hash) (uint64, bool) {
@@ -41,7 +39,7 @@ func (bm *BlockInfoMap) GetBlockNumberByHash(blockHash libcommon.Hash) (uint64, 
 	return blockNum, exists
 }
 
-func (bm *BlockInfoMap) PutNewHeader(blockNum uint64, blockInfo *BlockInfo) {
+func (bm *BlockInfoMap) PutNewBlockInfo(blockNum uint64, blockInfo *BlockInfo) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	bm.blockInfos[blockNum] = blockInfo
@@ -50,16 +48,12 @@ func (bm *BlockInfoMap) PutNewHeader(blockNum uint64, blockInfo *BlockInfo) {
 func (bm *BlockInfoMap) PutConfirmedBlockInfo(blockNum uint64, blockInfo *BlockInfo) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
-	if existingBlockInfo, exists := bm.blockInfos[blockNum]; exists && existingBlockInfo.StartBlockChangeset != nil {
-		blockInfo.StartBlockChangeset = existingBlockInfo.StartBlockChangeset
-	}
 	bm.blockInfos[blockNum] = blockInfo
 	bm.blockHashToHeight[blockInfo.Hash] = blockNum
-	log.Debug(fmt.Sprintf("PutConfirmedHeader: blockNum: %d, blockHash: %+v", blockNum, blockInfo.Hash))
 }
 
 func (bm *BlockInfoMap) Delete(blockNum uint64) {
-	_, _, blockhash, _, _, exists := bm.Get(blockNum)
+	_, _, blockhash, exists := bm.Get(blockNum)
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	if exists {

@@ -29,8 +29,7 @@ var (
 func ListenKafkaProducer(
 	ctx context.Context,
 	kafkaProducer *kafka.KafkaProducer,
-	newBlockInfoChan chan *realtimeTypes.HeaderWithChangeset,
-	confirmedBlockInfoChan chan *realtimeTypes.BlockWithChangeset,
+	blockInfoChan chan *realtimeTypes.BlockInfo,
 	txInfoChan chan state.TxInfo) {
 	if !sequencer.IsSequencer() {
 		log.Info("[Realtime] KafkaProducer is disabled on non-sequencer, skipping")
@@ -43,29 +42,17 @@ func ListenKafkaProducer(
 		select {
 		case <-ctx.Done():
 			return
-		case headerWithChangeset := <-newBlockInfoChan:
-			currHeight = headerWithChangeset.Header.Number.Uint64()
-			err := kafkaProducer.SendKafkaNewBlockInfo(headerWithChangeset)
+		case blockInfo := <-blockInfoChan:
+			currHeight = blockInfo.Header.Number.Uint64()
+			err := kafkaProducer.SendKafkaBlockInfo(blockInfo)
 			if err != nil {
-				log.Error(fmt.Sprintf("[Realtime] Failed to send kafka new block info message. error: %v, currHeight: %d", err, currHeight))
+				log.Error(fmt.Sprintf("[Realtime] Failed to send kafka block info message. error: %v, currHeight: %d, blockHash: %x", err, currHeight, blockInfo.Hash))
 				err = kafkaProducer.SendKafkaErrorTrigger(currHeight)
 				if err != nil {
 					log.Error(fmt.Sprintf("[Realtime] Failed to send error trigger message. error: %v, currHeight: %d", err, currHeight))
 				}
 			} else {
-				log.Debug(fmt.Sprintf("[Realtime] Sent kafka new block info message for block number %d", currHeight))
-			}
-		case blockWithChangeset := <-confirmedBlockInfoChan:
-			currHeight = blockWithChangeset.Block.NumberU64()
-			err := kafkaProducer.SendKafkaConfirmedBlockInfo(blockWithChangeset)
-			if err != nil {
-				log.Error(fmt.Sprintf("[Realtime] Failed to send kafka confirmed block info message. error: %v, currHeight: %d", err, currHeight))
-				err = kafkaProducer.SendKafkaErrorTrigger(currHeight)
-				if err != nil {
-					log.Error(fmt.Sprintf("[Realtime] Failed to send error trigger message. error: %v, currHeight: %d", err, currHeight))
-				}
-			} else {
-				log.Debug(fmt.Sprintf("[Realtime] Sent kafka confirmed block info message for block number %d", currHeight))
+				log.Debug(fmt.Sprintf("[Realtime] Sent kafka new block info message for block number %d, blockHash: %x", currHeight, blockInfo.Hash))
 			}
 		case txInfo := <-txInfoChan:
 			currHeight = txInfo.BlockNumber

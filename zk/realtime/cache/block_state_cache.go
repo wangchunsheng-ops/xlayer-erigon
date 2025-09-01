@@ -68,23 +68,7 @@ func (cache *BlockStateCache) Clear() {
 }
 
 // -------------- State apply operations --------------
-func (cache *BlockStateCache) ApplyTxChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
-	log.Debug(fmt.Sprintf("[Realtime] Applying tx changeset with height: %d, tx index: %d", blockNumber, txIndex))
-	return cache.applyChangeset(changeset, blockNumber, txIndex)
-}
-
-func (cache *BlockStateCache) ApplyStartBlockChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64) error {
-	log.Debug(fmt.Sprintf("[Realtime] Applying start block changeset with height: %d", blockNumber))
-	return cache.applyChangeset(changeset, blockNumber, 0)
-}
-
-func (cache *BlockStateCache) ApplyCloseBlockChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64) error {
-	log.Debug(fmt.Sprintf("[Realtime] Applying close block changeset with height: %d", blockNumber))
-	return cache.applyChangeset(changeset, blockNumber, 0)
-}
-
-// applyChangeset applies the given changeset to the cache (core logic)
-func (cache *BlockStateCache) applyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64, txIndex uint) error {
+func (cache *BlockStateCache) ApplyChangeset(changeset *realtimeTypes.Changeset, blockNumber uint64) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 

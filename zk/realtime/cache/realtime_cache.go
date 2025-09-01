@@ -39,6 +39,10 @@ type PendingBlockContext struct {
 	nextTxIndex uint
 	// txCount is the total tx count to close the current pending block. Set txCount to -1 to indicate the next block header has not been received yet.
 	txCount int64
+	// startBlockChangeset is the changset to be applied at the start of the current pending block
+	startBlockChangeset *realtimeTypes.Changeset
+	// endBlockChangeset is the changset to be applied at the end of the current pending block
+	endBlockChangeset *realtimeTypes.Changeset
 	// pendingTxs is the queue of pending txs to be processed in the current pending block
 	pendingTxs *realtimeTypes.OrderedList[*kafkaTypes.TransactionMessage]
 	// pendingStateCache is the pending state cache for the current pending block
@@ -173,11 +177,11 @@ func (cache *RealtimeCache) TryInitStateCache(executionHeight uint64) error {
 	return nil
 }
 
-func (cache *RealtimeCache) TryApplyNewBlockMsg(blockNum uint64, blockMsg *realtimeTypes.BlockInfo) error {
-	if err := cache.tryCreateNewPendingBlockContext(blockNum); err != nil {
+func (cache *RealtimeCache) TryApplyNewBlockMsg(blockNum uint64, startBlockMsg *realtimeTypes.BlockInfo) error {
+	if err := cache.tryCreateNewPendingBlockContext(blockNum, startBlockMsg); err != nil {
 		return err
 	}
-	cache.Stateless.PutNewHeader(blockNum, blockMsg)
+	cache.Stateless.PutNewBlockInfo(blockNum, startBlockMsg)
 	return nil
 }
 
@@ -202,6 +206,7 @@ func (cache *RealtimeCache) TryCloseBlockFromConfirmedBlockMsg(blockNum uint64, 
 
 	// Update pending block context
 	pendingContext.txCount = blockMsg.TxCount
+	pendingContext.endBlockChangeset = blockMsg.Changeset
 	return cache.tryCloseBlock(pendingContext)
 }
 
@@ -224,14 +229,12 @@ func (cache *RealtimeCache) HandlePendingBlocks(kafkaCache *KafkaCache) error {
 
 func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContext, sortedTxMsgs []*kafkaTypes.TransactionMessage) error {
 	// Apply start block changeset
-	if blockContext.nextTxIndex == 0 {
-		_, _, _, startBlockChangeset, _, ok := cache.Stateless.GetBlockInfo(blockContext.blockNum)
-		if ok && startBlockChangeset != nil {
-			err := blockContext.pendingStateCache.ApplyStartBlockChangeset(startBlockChangeset, blockContext.blockNum)
-			if err != nil {
-				return fmt.Errorf("failed to apply start block changeset. Block number: %d, error: %v", blockContext.blockNum, err)
-			}
+	if blockContext.startBlockChangeset != nil && blockContext.nextTxIndex == 0 {
+		err := blockContext.blockStateCache.ApplyChangeset(blockContext.startBlockChangeset, blockContext.blockNum)
+		if err != nil {
+			return fmt.Errorf("failed to apply start block changeset. Block number: %d, error: %v", blockContext.blockNum, err)
 		}
+		blockContext.startBlockChangeset = nil
 	}
 
 	// Add to pending queue
@@ -266,7 +269,7 @@ func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContex
 			return fmt.Errorf("failed to get inner txs. Block number: %d, tx index: %d, error: %v", txMsg.BlockNumber, blockContext.nextTxIndex, err)
 		}
 		cache.Stateless.PutTxInfo(blockContext.blockNum, txMsg.Hash, tx, receipt, innerTxs)
-		blockContext.blockStateCache.ApplyTxChangeset(txMsg.Changeset, txMsg.BlockNumber, txMsg.Receipt.TransactionIndex)
+		blockContext.blockStateCache.ApplyChangeset(txMsg.Changeset, txMsg.BlockNumber)
 		blockContext.nextTxIndex++
 		processed++
 	}
@@ -279,7 +282,7 @@ func (cache *RealtimeCache) tryApplyBlockTxMsgs(blockContext *PendingBlockContex
 	return cache.tryCloseBlock(blockContext)
 }
 
-func (cache *RealtimeCache) tryCreateNewPendingBlockContext(blockNum uint64) error {
+func (cache *RealtimeCache) tryCreateNewPendingBlockContext(blockNum uint64, startBlockMsg *realtimeTypes.BlockInfo) error {
 	confirmHeight := cache.GetHighestConfirmHeight()
 	if cache.pendingBlocks.Size() > PendingBlocksCacheSizeThreshold {
 		// Find the pending block context that is blocking, and log out the block context
@@ -328,11 +331,13 @@ func (cache *RealtimeCache) tryCreateNewPendingBlockContext(blockNum uint64) err
 
 	// Create new pending block context
 	newPendingBlockContext := &PendingBlockContext{
-		blockNum:        blockNum,
-		nextTxIndex:     0,
-		pendingTxs:      realtimeTypes.NewOrderedList(DefaultTxMsgSliceSize, CompareTransactionMessages),
-		txCount:         -1,
-		blockStateCache: bc,
+		blockNum:            blockNum,
+		nextTxIndex:         0,
+		pendingTxs:          realtimeTypes.NewOrderedList(DefaultTxMsgSliceSize, CompareTransactionMessages),
+		txCount:             -1,
+		startBlockChangeset: startBlockMsg.Changeset,
+		endBlockChangeset:   nil,
+		blockStateCache:     bc,
 	}
 	cache.pendingBlocks.Add(newPendingBlockContext)
 	cache.pendingBlocks.Sort()
@@ -360,16 +365,16 @@ func (cache *RealtimeCache) tryCloseBlock(pendingBlockContext *PendingBlockConte
 	nextHeight := cache.GetHighestConfirmHeight() + 1
 	if pendingBlockContext.blockNum != nextHeight {
 		// Block must be closed in order
-		return nil nil
+		return nil
 	}
 
 	// Apply close block changeset
-	_, _, _, _, closeBlockChangeset, ok := cache.Stateless.GetBlockInfo(pendingBlockContext.blockNum)
-	if ok && closeBlockChangeset != nil {
-		if err := pendingBlockContext.pendingStateCache.ApplyCloseBlockChangeset(closeBlockChangeset, pendingBlockContext.blockNum); err != nil {
+	if pendingBlockContext.endBlockChangeset != nil {
+		if err := pendingBlockContext.blockStateCache.ApplyChangeset(pendingBlockContext.endBlockChangeset, pendingBlockContext.blockNum); err != nil {
 			log.Error(fmt.Sprintf("[Realtime] Failed to apply closeBlock changeset. Block number: %d, error: %v", pendingBlockContext.blockNum, err))
 			return err
 		}
+		pendingBlockContext.endBlockChangeset = nil
 	}
 
 	// Close block

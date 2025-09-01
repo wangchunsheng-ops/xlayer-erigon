@@ -461,9 +461,11 @@ BatchLoop:
 		processingTxTime := time.Now()
 
 		// For X Layer, realtime. Send kafka block header
-		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaNewBlockInfoChan != nil {
-			cfg.kafkaNewBlockInfoChan <- &realtimeTypes.HeaderWithChangeset{
+		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaBlockInfoChan != nil {
+			cfg.kafkaBlockInfoChan <- &realtimeTypes.BlockInfo{
 				Header:    header,
+				TxCount:   -1,
+				Hash:      common.Hash{},
 				Changeset: preExecuteChangeset,
 			}
 		}
@@ -888,9 +890,12 @@ BatchLoop:
 			return err
 		}
 		// For X Layer, realtime
-		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaConfirmedBlockInfoChan != nil {
-			cfg.kafkaConfirmedBlockInfoChan <- &realtimeTypes.BlockWithChangeset{
-				Block:     block,
+		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaBlockInfoChan != nil {
+			blockTxCount := int64(len(block.Transactions()))
+			cfg.kafkaBlockInfoChan <- &realtimeTypes.BlockInfo{
+				Header:    block.Header(),
+				TxCount:   blockTxCount,
+				Hash:      block.Hash(),
 				Changeset: postExecuteChangeset,
 			}
 		}
