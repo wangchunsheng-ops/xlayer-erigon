@@ -26,14 +26,14 @@ func TestBlockInfoMap(t *testing.T) {
 	txCount := int64(10)
 
 	t.Run("BlockInfoMapPutAndGet", func(t *testing.T) {
-		bm.PutNewHeader(blockNum, &realtimeTypes.BlockInfo{
+		bm.PutNewBlockInfo(blockNum, &realtimeTypes.BlockInfo{
 			Header:  header,
 			TxCount: txCount,
 			Hash:    hash,
 		})
 
 		// Check current header
-		cacheHeader, cacheTxCount, cacheHash, _, _, exists := bm.Get(blockNum)
+		cacheHeader, cacheTxCount, cacheHash, exists := bm.Get(blockNum)
 		assert.True(t, exists)
 		assert.Equal(t, header, cacheHeader)
 		assert.Equal(t, txCount, cacheTxCount)
@@ -42,13 +42,13 @@ func TestBlockInfoMap(t *testing.T) {
 
 	t.Run("BlockInfoMapGetNonExistent", func(t *testing.T) {
 		nonExistentNum := uint64(888)
-		_, _, _, _, _, exists := bm.Get(nonExistentNum)
+		_, _, _, exists := bm.Get(nonExistentNum)
 		assert.False(t, exists)
 	})
 
 	t.Run("BlockInfoMapDelete", func(t *testing.T) {
 		bm.Delete(blockNum)
-		_, _, _, _, _, exists := bm.Get(blockNum)
+		_, _, _, exists := bm.Get(blockNum)
 		assert.False(t, exists)
 	})
 
@@ -63,12 +63,12 @@ func TestBlockInfoMap(t *testing.T) {
 			hash := common.HexToHash(fmt.Sprintf("0x%x", i))
 
 			// Test PutHeader
-			bm.PutNewHeader(blockNum, &realtimeTypes.BlockInfo{
+			bm.PutNewBlockInfo(blockNum, &realtimeTypes.BlockInfo{
 				Header:  header,
 				TxCount: txCount,
 				Hash:    hash,
 			})
-			cacheHeader, cacheTxCount, cacheHash, _, _, exists := bm.Get(blockNum)
+			cacheHeader, cacheTxCount, cacheHash, exists := bm.Get(blockNum)
 			assert.True(t, exists)
 			assert.NotNil(t, cacheHeader)
 			assert.Equal(t, big.NewInt(int64(i)), cacheHeader.Number)
@@ -81,7 +81,7 @@ func TestBlockInfoMap(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			blockNum := uint64(i)
 			bm.Delete(blockNum)
-			_, _, _, _, _, exists := bm.Get(blockNum)
+			_, _, _, exists := bm.Get(blockNum)
 			assert.False(t, exists)
 		}
 	})
