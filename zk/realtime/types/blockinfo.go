@@ -11,7 +11,7 @@ type BlockInfo struct {
 	Header    *types.Header  `json:"header"`
 	TxCount   int64          `json:"txCount"`
 	Hash      libcommon.Hash `json:"hash"`
-	Changeset *Changeset     `json:"startOrEndBlockChangeset,omitempty"`
+	Changeset *Changeset     `json:"changeset,omitempty"`
 }
 
 func (msg BlockInfo) Validate(executionHeight uint64) error {
