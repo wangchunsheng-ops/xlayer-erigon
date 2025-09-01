@@ -85,6 +85,40 @@ func TestGetBatchSealTime(t *testing.T) {
 	log.Infof("Max block time: %d, batchSealTime: %d", maxTime, batchSealTime)
 	require.Equal(t, maxTime, batchSealTime)
 }
+func TestInvalidTransaferTokenFrom(t *testing.T) {
+	ctx := context.Background()
+	client, err := ethclient.Dial(operations.DefaultL2NetworkURL)
+	log.Infof("Start TestInvalidTransaferTokenFrom and remove transaction")
+	nonce := getNonce(client, ctx, "0x"+tmpSenderPrivateKey)
+	// send to non specific project sender
+	privateKeyNon, err := crypto.HexToECDSA(nonSpecificProjectSenderPrivateKay)
+	require.NoError(t, err)
+
+	publicKeyNon := privateKeyNon.Public()
+	publicKeyECDSANon, ok := publicKeyNon.(*ecdsa.PublicKey)
+	require.True(t, ok)
+	fromAddressNon := crypto.PubkeyToAddress(*publicKeyECDSANon)
+	signedTx := generateSignedTokenTransferTx(t, ctx, client, "0x"+tmpSenderPrivateKey,
+		new(uint256.Int).Mul(uint256.NewInt(100), uint256.NewInt(1e18)), fromAddressNon.String(), nonce+1)
+	err = client.SendTransaction(ctx, signedTx)
+	if err != nil {
+		log.Infof("TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
+		return
+	}
+	status, err := operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("Transaction status before remove transaction: %v", status)
+
+	// remove the transaction
+	err = operations.RemoveTransaction(signedTx.Hash())
+	require.True(t, err == nil)
+	// check the transaction status
+	status, err = operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("Transaction status after remove transaction: %v", status)
+
+	log.Infof("TestInvalidTransaferTokenFrom and remove transaction successfully")
+}
 
 func TestBridgeTx(t *testing.T) {
 	ctx := context.Background()
@@ -481,11 +515,31 @@ func transToken(t *testing.T, ctx context.Context, client *ethclient.Client, amo
 	return transTokenWithFrom(t, ctx, client, operations.DefaultL2AdminPrivateKey, amount, toAddress)
 }
 
+func getNonce(client *ethclient.Client, ctx context.Context, fromPrivateKey string) uint64 {
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		log.Infof("Get nonce err for get chainID failed: %v", err)
+	}
+	auth, err := operations.GetAuth(fromPrivateKey, chainID.Uint64())
+	if err != nil {
+		log.Infof("Get nonce err for get auth fialed: %v", err)
+	}
+	nonce, err := client.PendingNonceAt(ctx, auth.From)
+	if err != nil {
+		log.Infof("Get nonce err for PendingNonceAt failed: %v", err)
+	}
+	return nonce
+}
+
 func transTokenWithFrom(t *testing.T, ctx context.Context, client *ethclient.Client, fromPrivateKey string, amount *uint256.Int, toAddress string) string {
+	return transTokenWithFromImpl(t, ctx, client, fromPrivateKey, amount, toAddress, getNonce(client, ctx, fromPrivateKey))
+}
+
+func generateSignedTokenTransferTx(t *testing.T, ctx context.Context, client *ethclient.Client, fromPrivateKey string, amount *uint256.Int, toAddress string, nonce uint64) types.Transaction {
 	chainID, err := client.ChainID(ctx)
 	require.NoError(t, err)
 	auth, err := operations.GetAuth(fromPrivateKey, chainID.Uint64())
-	nonce, err := client.PendingNonceAt(ctx, auth.From)
+
 	gasPrice, err := client.SuggestGasPrice(ctx)
 	require.NoError(t, err)
 
@@ -515,8 +569,12 @@ func transTokenWithFrom(t *testing.T, ctx context.Context, client *ethclient.Cli
 	signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
 	signedTx, err := types.SignTx(tx, *signer, privateKey)
 	require.NoError(t, err)
+	return signedTx
+}
 
-	err = client.SendTransaction(ctx, signedTx)
+func transTokenWithFromImpl(t *testing.T, ctx context.Context, client *ethclient.Client, fromPrivateKey string, amount *uint256.Int, toAddress string, nonce uint64) string {
+	signedTx := generateSignedTokenTransferTx(t, ctx, client, fromPrivateKey, amount, toAddress, nonce)
+	err := client.SendTransaction(ctx, signedTx)
 	require.NoError(t, err)
 
 	err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
