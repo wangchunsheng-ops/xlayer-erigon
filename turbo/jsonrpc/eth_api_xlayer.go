@@ -61,7 +61,7 @@ func (apii *APIImpl) listenApollo(ctx context.Context) {
 			}
 			if slices.Contains(ethCfg.XLayer.ApolloChanged, utils.DynamicBlockGasLimit.Name) {
 				apii.BlockGasLimit = ethCfg.XLayer.DynamicBlockGasLimit
-				apii.logger.Info("dynamic block gas limit changed", "new", apii.BlockGasLimit)
+				apii.logger.Info("dynamic block gas limit changed", "new", apii.BlockGasLimit, "instance_pointer", fmt.Sprintf("%p", apii))
 			}
 		case <-ctx.Done():
 			return
