@@ -194,6 +194,7 @@ func (api *APIImpl) MinGasPrice(ctx context.Context) (*hexutil.Big, error) {
 func (api *APIImpl) GetBlockGasLimit(ctx context.Context) (*hexutil.Big, error) {
 	if sequencer.IsSequencer() {
 		gasLimit := big.NewInt(int64(api.BlockGasLimit))
+		log.Info("Getting block gas limit in Sequencer", gasLimit)
 		return (*hexutil.Big)(gasLimit), nil
 	}
 
@@ -201,6 +202,7 @@ func (api *APIImpl) GetBlockGasLimit(ctx context.Context) (*hexutil.Big, error) 
 	if err != nil {
 		return nil, err
 	}
+	log.Info("Getting block gas limit  in RPC", gasLimit)
 
 	return (*hexutil.Big)(big.NewInt(int64(gasLimit))), nil
 }

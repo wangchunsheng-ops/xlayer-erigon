@@ -233,6 +233,7 @@ func getBlockGasLimitFromSequencer(sequencerRpcUrl string) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to call eth_getBlockGasLimit to sequencer.err:%v. sequencerRpcUrl:%s", err, sequencerRpcUrl)
 	}
+	log.Info("Get BlockGasLimit From Sequencer Success ", response.Result)
 	return transHexToUint64(response.Result)
 }
 
