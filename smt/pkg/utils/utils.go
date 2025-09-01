@@ -704,9 +704,11 @@ func Key(ethAddr string, c int) NodeKey {
 	a := ConvertHexToBigInt(ethAddr)
 	add := ScalarToArrayUint64(a)
 
-	key1 := [8]uint64{add[0], add[1], add[2], add[3], add[4], add[5], uint64(c), uint64(0)}
+	//key1 := [8]uint64{add[0], add[1], add[2], add[3], add[4], add[5], uint64(c), uint64(0)}
+	add[6] = uint64(c)
+	add[7] = 0
 
-	return Hash(key1, key1Capacity)
+	return *HashByPointers(&add, &key1Capacity)
 }
 
 func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
@@ -716,7 +718,7 @@ func ScalarToArrayUint64(scalar *big.Int) [8]uint64 {
 		return result
 	}
 
-	tmp := new(big.Int).Set(scalar)
+	tmp := scalar
 	for i := 0; i < 8; i++ {
 		result[i] = tmp.Uint64() & 0xFFFFFFFF
 		tmp.Rsh(tmp, 32)
