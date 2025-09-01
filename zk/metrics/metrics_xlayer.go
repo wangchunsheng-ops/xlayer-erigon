@@ -1,10 +1,6 @@
 package metrics
 
 import (
-	"fmt"
-	"time"
-
-	"github.com/ledgerwatch/log/v3"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -17,272 +13,166 @@ const (
 )
 
 var (
-	SeqPrefix                     = "sequencer_"
-	SeqBlockNumberName            = SeqPrefix + "block_number"
-	SeqBlockExecuteTimingName     = SeqPrefix + "block_execute_timing"
-	SeqBlockProcessTxTimingName   = SeqPrefix + "block_process_tx_timing"
-	SeqBlockGetTxTimingName       = SeqPrefix + "block_get_tx_timing"
-	SeqBlockGetTxPauseTimingName  = SeqPrefix + "block_get_tx_pause_timing"
-	SeqBlockInvalidTxCountName    = SeqPrefix + "block_invalid_tx_count"
-	SeqBlockSetSmtCacheTimingName = SeqPrefix + "block_set_smt_cache_timing"
-
-	SeqPoolTxCountName  = SeqPrefix + "pool_tx_count"
-	SeqTxDurationName   = SeqPrefix + "tx_duration"
-	SeqTxCountName      = SeqPrefix + "tx_count"
-	SeqBlockGasUsedName = SeqPrefix + "block_gas_used"
-
-	SeqBatchNumberName                        = SeqPrefix + "batch_number"
-	SeqBatchExecuteTimingName                 = SeqPrefix + "batch_execute_timing"
-	SeqBatchDurationName                      = SeqPrefix + "batch_duration"
-	SeqSequencingBatchTimingName              = SeqPrefix + "sequencing_batch_timing"
-	SeqBatchProcessTxTimingName               = SeqPrefix + "process_tx_timing"
-	SeqBatchGetTxTimingName                   = SeqPrefix + "get_tx_timing"
-	SeqBatchGetTxPauseTimingName              = SeqPrefix + "get_tx_pause_timing"
-	SeqBatchPbStateTimingName                 = SeqPrefix + "pb_state_timing"
-	SeqBatchZkIncIntermediateHashesTimingName = SeqPrefix + "zk_inc_intermediate_hashes_timing"
-	SeqBatchFinaliseBlockWriteTimingName      = SeqPrefix + "finalise_block_write_timing"
-	SeqBatchSmtBatchCommitDBTimingName        = SeqPrefix + "smt_batch_commit_db_timing"
-	SeqBatchCommitDBTimingName                = SeqPrefix + "batch_commit_db_timing"
-	SeqBatchSetSmtCacheTimingName             = SeqPrefix + "batch_set_smt_cache_timing"
-
-	RpcPrefix              = "rpc_"
-	RpcDynamicGasPriceName = RpcPrefix + "dynamic_gas_price"
-	RpcInnerTxExecutedName = RpcPrefix + "inner_tx_executed"
-)
-
-func Init() {
-	prometheus.MustRegister(BatchExecuteTimingGauge)
-	prometheus.MustRegister(PoolTxCount)
-	prometheus.MustRegister(SeqTxDuration)
-	prometheus.MustRegister(SeqTxCount)
-	prometheus.MustRegister(SeqBlockGasUsed)
-	prometheus.MustRegister(SeqBatchNumber)
-
-	// Register block metrics
-	prometheus.MustRegister(SeqBlockNumber)
-	prometheus.MustRegister(SeqBlockExecuteTiming)
-	prometheus.MustRegister(SeqBlockProcessTxTiming)
-	prometheus.MustRegister(SeqBlockGetTxTiming)
-	prometheus.MustRegister(SeqBlockGetTxPauseTiming)
-	prometheus.MustRegister(SeqBlockInvalidTxCount)
-	prometheus.MustRegister(SeqBlockSetSmtCacheTiming)
-	prometheus.MustRegister(RpcDynamicGasPrice)
-	prometheus.MustRegister(RpcInnerTxExecuted)
-
-	// Register new batch timing metrics
-	prometheus.MustRegister(SeqBatchDuration)
-	prometheus.MustRegister(SeqSequencingBatchTiming)
-	prometheus.MustRegister(SeqBatchProcessTxTiming)
-	prometheus.MustRegister(SeqBatchGetTxTiming)
-	prometheus.MustRegister(SeqBatchGetTxPauseTiming)
-	prometheus.MustRegister(SeqBatchPbStateTiming)
-	prometheus.MustRegister(SeqBatchZkIncIntermediateHashesTiming)
-	prometheus.MustRegister(SeqBatchFinaliseBlockWriteTiming)
-	prometheus.MustRegister(SeqBatchSmtBatchCommitDBTiming)
-	prometheus.MustRegister(SeqBatchCommitDBTiming)
-	prometheus.MustRegister(SeqBatchSetSmtCacheTiming)
-}
-
-var BatchExecuteTimingGauge = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Name: SeqBatchExecuteTimingName,
-		Help: "[SEQUENCER] batch execution timing in millisecond (ms)",
-	},
-	[]string{"closingReason"},
-)
-
-var PoolTxCount = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Name: SeqPoolTxCountName,
-		Help: "[SEQUENCER] tx count of each pool in tx pool",
-	},
-	[]string{"poolName"},
-)
-
-func BatchExecuteTiming(closingReason string, duration time.Duration) {
-	log.Info(fmt.Sprintf("[BatchExecuteTiming] ClosingReason: %v, Duration: %dms", closingReason, duration.Milliseconds()))
-	BatchExecuteTimingGauge.WithLabelValues(closingReason).Set(float64(duration.Milliseconds()))
-}
-
-func AddPoolTxCount(pending, baseFee, queued int) {
-	log.Info(fmt.Sprintf("[PoolTxCount] pending: %v, basefee: %v, queued: %v", pending, baseFee, queued))
-	PoolTxCount.WithLabelValues("pending").Set(float64(pending))
-	PoolTxCount.WithLabelValues("basefee").Set(float64(baseFee))
-	PoolTxCount.WithLabelValues("queued").Set(float64(queued))
-}
-
-var RpcDynamicGasPrice = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: RpcDynamicGasPriceName,
-		Help: "[RPC] dynamic gas price",
-	},
-)
-
-var RpcInnerTxExecuted = prometheus.NewCounter(
-	prometheus.CounterOpts{
-		Name: RpcInnerTxExecutedName,
-		Help: "[RPC] inner tx executed, used to trace contract calls in blockchain explorer",
-	},
-)
-
-var SeqTxDuration = prometheus.NewSummary(
-	prometheus.SummaryOpts{
-		Name: SeqTxDurationName,
-		Help: "[SEQUENCER] tx processing duration in millisecond (ms)",
-		Objectives: map[float64]float64{
-			0.5:  0.05,  // 50th percentile (median) with 5% error
-			0.9:  0.01,  // 90th percentile with 1% error
-			0.95: 0.005, // 95th percentile with 0.5% error
-			0.99: 0.001, // 99th percentile with 0.1% error
+	// OperationTiming tracks operation timing in seconds
+	OperationTiming = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "xlayer_operation_timing_seconds",
+			Help:    "Xlayer operation timing in seconds",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0, 60.0},
 		},
-	},
-)
+		[]string{"component", "metric_type"},
+	)
 
-var SeqTxCount = prometheus.NewCounter(
-	prometheus.CounterOpts{
-		Name: SeqTxCountName,
-		Help: "[SEQUENCER] total processed tx count",
-	},
-)
-
-var SeqBlockGasUsed = prometheus.NewGauge(
+	// OperationGauge tracks current state of operations
+	OperationGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
-		Name: SeqBlockGasUsedName,
-		Help: "[SEQUENCER] gas used per block",
-	},
+			Name: "xlayer_operation_current",
+			Help: "Current state of xlayer operations (timing in seconds, others in original units)",
+		},
+		[]string{"component", "metric_type"},
+	)
+
+	// OperationCounter counts operations
+	OperationCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "xlayer_operation_counter",
+			Help: "Total count of xlayer operations",
+		},
+		[]string{"component", "metric_type"},
+	)
 )
 
-var SeqBatchNumber = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchNumberName,
-		Help: "[SEQUENCER] latest batch number",
-	},
-)
+// Init registers all metrics with Prometheus
+func Init() {
+	prometheus.MustRegister(OperationTiming)
+	prometheus.MustRegister(OperationCounter)
+	prometheus.MustRegister(OperationGauge)
+}
 
-// Block metrics
-var SeqBlockNumber = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockNumberName,
-		Help: "[SEQUENCER] latest block number",
-	},
-)
+// Block timing functions
+func RecordBlockExecuteTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("block", "execute_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "execute_timing").Set(seconds)
+}
 
-var SeqBlockExecuteTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockExecuteTimingName,
-		Help: "[SEQUENCER] block execution timing in milliseconds",
-	},
-)
+func RecordBlockProcessTxTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("block", "process_tx_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "process_tx_timing").Set(seconds)
+}
 
-var SeqBlockProcessTxTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockProcessTxTimingName,
-		Help: "[SEQUENCER] block process transaction timing in milliseconds",
-	},
-)
+func RecordBlockGetTxTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("block", "get_tx_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "get_tx_timing").Set(seconds)
+}
 
-var SeqBlockGetTxTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockGetTxTimingName,
-		Help: "[SEQUENCER] block get transaction timing in milliseconds",
-	},
-)
+func RecordBlockGetTxPauseTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("block", "get_tx_pause_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "get_tx_pause_timing").Set(seconds)
+}
 
-var SeqBlockGetTxPauseTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockGetTxPauseTimingName,
-		Help: "[SEQUENCER] block get transaction pause timing in milliseconds",
-	},
-)
+func RecordBlockSetSmtCacheTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("block", "set_smt_cache_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "set_smt_cache_timing").Set(seconds)
+}
 
-var SeqBlockInvalidTxCount = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockInvalidTxCountName,
-		Help: "[SEQUENCER] number of invalid transactions in block",
-	},
-)
+// Batch timing functions
+func RecordBatchExecuteTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "execute_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "execute_timing").Set(seconds)
+}
 
-var SeqBlockSetSmtCacheTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBlockSetSmtCacheTimingName,
-		Help: "[SEQUENCER] block set SMT cache timing in milliseconds",
-	},
-)
+func RecordBatchSequencingTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "sequencing_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "sequencing_timing").Set(seconds)
+}
 
-// Batch timing metrics
-var SeqBatchDuration = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchDurationName,
-		Help: "[SEQUENCER] total batch duration in milliseconds",
-	},
-)
+func RecordBatchProcessTxTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "process_tx_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "process_tx_timing").Set(seconds)
+}
 
-var SeqSequencingBatchTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqSequencingBatchTimingName,
-		Help: "[SEQUENCER] sequencing batch timing in milliseconds",
-	},
-)
+func RecordBatchGetTxTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "get_tx_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "get_tx_timing").Set(seconds)
+}
 
-var SeqBatchProcessTxTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchProcessTxTimingName,
-		Help: "[SEQUENCER] process transaction timing in milliseconds",
-	},
-)
+func RecordBatchGetTxPauseTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "get_tx_pause_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "get_tx_pause_timing").Set(seconds)
+}
 
-var SeqBatchGetTxTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchGetTxTimingName,
-		Help: "[SEQUENCER] get transaction timing in milliseconds",
-	},
-)
+func RecordBatchPbStateTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "pb_state_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "pb_state_timing").Set(seconds)
+}
 
-var SeqBatchGetTxPauseTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchGetTxPauseTimingName,
-		Help: "[SEQUENCER] get transaction pause timing in milliseconds",
-	},
-)
+func RecordBatchZkIncIntermediateHashesTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "zk_inc_intermediate_hashes_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "zk_inc_intermediate_hashes_timing").Set(seconds)
+}
 
-var SeqBatchPbStateTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchPbStateTimingName,
-		Help: "[SEQUENCER] pb state timing in milliseconds",
-	},
-)
+func RecordBatchFinaliseBlockWriteTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "finalise_block_write_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "finalise_block_write_timing").Set(seconds)
+}
 
-var SeqBatchZkIncIntermediateHashesTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchZkIncIntermediateHashesTimingName,
-		Help: "[SEQUENCER] zk increment intermediate hashes timing in milliseconds",
-	},
-)
+func RecordBatchSmtCommitDBTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "smt_commit_db_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "smt_commit_db_timing").Set(seconds)
+}
 
-var SeqBatchFinaliseBlockWriteTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchFinaliseBlockWriteTimingName,
-		Help: "[SEQUENCER] finalise block write timing in milliseconds",
-	},
-)
+func RecordBatchCommitDBTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "commit_db_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "commit_db_timing").Set(seconds)
+}
 
-var SeqBatchSmtBatchCommitDBTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchSmtBatchCommitDBTimingName,
-		Help: "[SEQUENCER] smt batch commit DB timing in milliseconds",
-	},
-)
+func RecordBatchSetSmtCacheTimingMs(durationMs int64) {
+	seconds := float64(durationMs) / 1000.0
+	OperationTiming.WithLabelValues("batch", "set_smt_cache_timing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "set_smt_cache_timing").Set(seconds)
+}
 
-var SeqBatchCommitDBTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchCommitDBTimingName,
-		Help: "[SEQUENCER] batch commit DB timing in milliseconds",
-	},
-)
+// Gauge functions
+func SetBlockGasUsed(gasUsed float64) {
+	OperationGauge.WithLabelValues("block", "gas_used").Set(gasUsed)
+}
 
-var SeqBatchSetSmtCacheTiming = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Name: SeqBatchSetSmtCacheTimingName,
-		Help: "[SEQUENCER] batch set SMT cache timing in milliseconds",
-	},
-)
+func SetRpcDynamicGasPrice(gasPrice float64) {
+	OperationGauge.WithLabelValues("rpc", "dynamic_gas_price").Set(gasPrice)
+}
+
+// Counter functions
+func IncBlockTxCount(txCount float64) {
+	OperationCounter.WithLabelValues("block", "tx_count").Add(txCount)
+}
+
+func IncBlockInvalidTxCount(invalidTxCount float64) {
+	OperationCounter.WithLabelValues("block", "invalid_tx_count").Add(invalidTxCount)
+}
+
+func IncBatchTxCount(txCount float64) {
+	OperationCounter.WithLabelValues("batch", "tx_count").Add(txCount)
+}
+
+func IncBatchInvalidTxCount(invalidTxCount float64) {
+	OperationCounter.WithLabelValues("batch", "invalid_tx_count").Add(invalidTxCount)
+}
+
+func IncRpcInnerTxExecuted(innerTxCount float64) {
+	OperationCounter.WithLabelValues("rpc", "inner_tx_count").Add(innerTxCount)
+}
