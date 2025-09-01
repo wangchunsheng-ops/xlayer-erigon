@@ -248,8 +248,8 @@ func (rc *RealtimeClient) RealtimeGetCode(address common.Address) (string, error
 }
 
 // RealtimeGetStorageAt returns the value from a storage position at a given address in real-time
-func (rc *RealtimeClient) RealtimeGetStorageAt(address common.Address, position string) (string, error) {
-	response, err := client.JSONRPCCall(rc.url, "eth_getStorageAt", address, position, PendingTag)
+func (rc *RealtimeClient) RealtimeGetStorageAt(address common.Address, position string, tag string) (string, error) {
+	response, err := client.JSONRPCCall(rc.url, "eth_getStorageAt", address, position, tag)
 	if err != nil {
 		return "", err
 	}

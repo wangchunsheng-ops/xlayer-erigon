@@ -148,7 +148,7 @@ func TestRealtimeRPC(t *testing.T) {
 
 	t.Run("RealtimeGetStorageAt", func(t *testing.T) {
 		// 0x2 is refered to _totalSupply field
-		value, err := client.RealtimeGetStorageAt(erc20Address, "0x2")
+		value, err := client.RealtimeGetStorageAt(erc20Address, "0x2", "pending")
 		require.NoError(t, err)
 		require.Equal(t, "0x00000000000000000000000000000000000000000052b7d2dcc80cd2e4000000", value, "Storage at index 0x2 should be equal to 1000000000000000000000")
 		log.Info(fmt.Sprintf("RealtimeGetStorageAt result for erc20 contract %s at index %s: %s", erc20Address, "0x2", value))
