@@ -94,6 +94,16 @@ func XLayerTestnetGenesisBlock() *types.Genesis {
 	}
 }
 
+func PPXLayerTestnetGenesisBlock() *types.Genesis {
+	return &types.Genesis{
+		Config:     params.PPXLayerTestnetChainConfig,
+		Timestamp:  1749551688,
+		GasLimit:   0x0,
+		Difficulty: big.NewInt(0x0),
+		Alloc:      readPrealloc("allocs/dynamic-ppxlayer-allocs.json"),
+	}
+}
+
 func XLayerMainnetGenesisBlock() *types.Genesis {
 	return &types.Genesis{
 		Config:     params.XLayerMainnetChainConfig,

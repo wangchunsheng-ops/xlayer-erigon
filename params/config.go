@@ -82,6 +82,7 @@ var (
 	HermezBaliGenesisHash              = libcommon.HexToHash("0x7311011ce6ab98ef0a15e44fe29f7680909588322534d1736361daa678543038")
 	XLayerTestnetGenesisHash           = libcommon.HexToHash("0x22a8085892b367833bd7431fa5a90ff6b5d3769167cdaa29ce8571d07bc8f866")
 	XLayerMainnetGenesisHash           = libcommon.HexToHash("0x11f32f605beb94a1acb783cb3b6da6d7975461ce3addf441e7ad60c2ec95e88f")
+	PPXLayerTestnetGenesisHash         = libcommon.HexToHash("0xc012c41e4583a2e3b776aff34aea0b4fd235d098484a455956554dbf69b8235e")
 	HermezEtrogGenesisHash             = libcommon.HexToHash("0x5e14aefe391fafa040ee0a0fff6afbc1c230853b9684afb9363f3af081db0192")
 )
 
@@ -174,6 +175,8 @@ var (
 	XLayerTestnetChainConfig = readChainSpec("chainspecs/xlayer-testnet.json")
 
 	XLayerMainnetChainConfig = readChainSpec("chainspecs/xlayer-mainnet.json")
+
+	PPXLayerTestnetChainConfig = readChainSpec("chainspecs/dynamic-ppxlayer-chainspec.json")
 
 	CliqueSnapshot = NewSnapshotConfig(10, 1024, 16384, true, "")
 
@@ -320,6 +323,8 @@ func ChainConfigByChainName(chain string) *chain.Config {
 		return HermezBaliChainConfig
 	case networkname.XLayerTestnetChainName:
 		return XLayerTestnetChainConfig
+	case networkname.PPXLayerTestnetChainName:
+		return PPXLayerTestnetChainConfig
 	case networkname.XLayerMainnetChainName:
 		return XLayerMainnetChainConfig
 	default:
@@ -365,6 +370,8 @@ func GenesisHashByChainName(chain string) *libcommon.Hash {
 		return &HermezBaliGenesisHash
 	case networkname.XLayerTestnetChainName:
 		return &XLayerTestnetGenesisHash
+	case networkname.PPXLayerTestnetChainName:
+		return &PPXLayerTestnetGenesisHash
 	case networkname.XLayerMainnetChainName:
 		return &XLayerMainnetGenesisHash
 	default:
@@ -408,6 +415,8 @@ func ChainConfigByGenesisHash(genesisHash libcommon.Hash) *chain.Config {
 		return HermezBaliChainConfig
 	case genesisHash == XLayerTestnetGenesisHash:
 		return XLayerTestnetChainConfig
+	case genesisHash == PPXLayerTestnetGenesisHash:
+		return PPXLayerTestnetChainConfig
 	case genesisHash == XLayerMainnetGenesisHash:
 		return XLayerMainnetChainConfig
 	default:

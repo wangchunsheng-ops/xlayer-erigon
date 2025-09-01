@@ -11,6 +11,7 @@ var chainIds = []uint64{
 	10010,  //etrog testnet
 	999999, // local devnet
 	123,    // estestnet
+	1952,   //ppxlayer-testnet
 }
 
 var chainIdToName = map[uint64]string{
@@ -22,6 +23,7 @@ var chainIdToName = map[uint64]string{
 	10010:  networkname.HermezEtrogChainName,
 	999999: networkname.HermezLocalDevnetChainName,
 	123:    networkname.HermezESTestChainName,
+	1952:   networkname.PPXLayerTestnetChainName,
 }
 
 func IsZk(chainId uint64) bool {
