@@ -1378,15 +1378,6 @@ func (p *TxPool) discardLocked(mt *metaTx, reason DiscardReason) {
 	p.discardReasonsLRU.Add(string(mt.Tx.IDHash[:]), reason)
 }
 
-// batchDiscardLocked remove the txs list when obtain the write-lock, to decrease the lock contention
-func (p *TxPool) batchDiscardLocked(mts []*metaTx, reason DiscardReason) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	for _, mt := range mts {
-		p.discardLocked(mt, reason)
-	}
-}
-
 func (p *TxPool) safeDiscardLocked(mt *metaTx, reason DiscardReason) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -2483,15 +2474,6 @@ func (p *PendingPool) Remove(i *metaTx) {
 	defer p.mtx.Unlock()
 
 	p.RemoveNoLock(i)
-}
-
-// BatchRemove remove the txs list when get the write-lock, to decrease the lock contention
-func (p *PendingPool) BatchRemove(txs []*metaTx) {
-	p.mtx.Lock()
-	defer p.mtx.Unlock()
-	for _, mt := range txs {
-		p.RemoveNoLock(mt)
-	}
 }
 
 func (p *PendingPool) Add(i *metaTx) {
