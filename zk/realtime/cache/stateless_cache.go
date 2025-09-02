@@ -50,12 +50,19 @@ func (cache *StatelessCache) GetTxInfo(txHash libcommon.Hash) (ethTypes.Transact
 }
 
 func (cache *StatelessCache) GetBlockTxs(blockNum uint64) ([]libcommon.Hash, bool) {
-	return cache.txInfoMap.GetBlockTxs(blockNum)
+	if _, _, _, ok := cache.blockInfoMap.Get(blockNum); !ok {
+		return nil, false
+	}
+	return cache.txInfoMap.GetBlockTxs(blockNum), true
 }
 
 // -------------- Write operations --------------
-func (cache *StatelessCache) PutHeader(blockNum uint64, header *ethTypes.Header, preBlockInfo *realtimeTypes.BlockInfo) {
-	cache.blockInfoMap.PutHeader(blockNum, header, preBlockInfo)
+func (cache *StatelessCache) PutNewHeader(blockNum uint64, blockInfo *realtimeTypes.BlockInfo) {
+	cache.blockInfoMap.PutNewHeader(blockNum, blockInfo)
+}
+
+func (cache *StatelessCache) PutConfirmedHeader(blockNum uint64, blockInfo *realtimeTypes.BlockInfo) {
+	cache.blockInfoMap.PutConfirmedHeader(blockNum, blockInfo)
 }
 
 func (cache *StatelessCache) PutTxInfo(blockNum uint64, txHash libcommon.Hash, tx ethTypes.Transaction, receipt *ethTypes.Receipt, innerTxs []*zktypes.InnerTx) {

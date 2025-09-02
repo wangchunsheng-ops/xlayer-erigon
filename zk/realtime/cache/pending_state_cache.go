@@ -10,7 +10,7 @@ import (
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/turbo/trie"
 	realtimeTypes "github.com/ledgerwatch/erigon/zk/realtime/types"
-	"github.com/ledgerwatch/erigon/zkevm/log"
+	"github.com/ledgerwatch/log/v3"
 )
 
 // GlobalStateCache implements the plain state reader with a changeset cache layer.
@@ -70,7 +70,7 @@ func (cache *PendingStateCache) ApplyChangeset(changeset *realtimeTypes.Changese
 	for address, account := range addressChanges {
 		delete(cache.cache.accountCache, address)
 		cache.cache.accountCache[address] = account
-		log.Debug("[Realtime] ApplyChangeset: ", address)
+		log.Debug(fmt.Sprintf("[Realtime] ApplyChangeset: %s", address))
 	}
 
 	log.Debug(fmt.Sprintf("[Realtime] Apply changeset from tx with height: %d, txIndex: %d\n", blockNumber, txIndex))

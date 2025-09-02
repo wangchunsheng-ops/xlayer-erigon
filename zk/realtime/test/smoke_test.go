@@ -32,8 +32,7 @@ import (
 	"github.com/ledgerwatch/erigon/zk/realtime/rtclient"
 	zktypes "github.com/ledgerwatch/erigon/zk/types"
 	"github.com/ledgerwatch/erigon/zkevm/encoding"
-	"github.com/ledgerwatch/erigon/zkevm/log"
-	logger "github.com/ledgerwatch/log/v3"
+	"github.com/ledgerwatch/log/v3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -288,6 +287,37 @@ func TestRealtimeRPC(t *testing.T) {
 		log.Info(fmt.Sprintf("RealtimeGetBlockInternalTransactions successfully returned data for block %d", targetBlockNumber))
 	})
 
+	t.Run("RealtimeGetBlockReceipts", func(t *testing.T) {
+		numberOfTransactions := 10
+
+		// Create the specified number of transactions and wait for them to be mined
+		txHashes := transTokenBatch(t, context.Background(), client, uint256.NewInt(encoding.Gwei), testAddress.String(), numberOfTransactions)
+		lastTxHash := txHashes[len(txHashes)-1]
+
+		// Get the block information from the last transaction's receipt
+		receipt, err := client.RealtimeGetTransactionReceipt(common.HexToHash(lastTxHash))
+		require.NoError(t, err)
+		require.NotNil(t, receipt, "Transaction receipt should not be nil")
+
+		receiptsByNumber, err := client.RealtimeGetBlockReceiptsByNumber(receipt.BlockNumber.Uint64())
+		require.NoError(t, err)
+		require.NotNil(t, receiptsByNumber, "Transaction receipts by number should not be nil")
+		for _, receipt := range receiptsByNumber {
+			require.NoError(t, err)
+			require.NotNil(t, receipt)
+			log.Info(fmt.Sprintf("RealtimeGetBlockReceiptsByNumber result type: %T", receipt))
+		}
+
+		receiptsByHash, err := client.RealtimeGetBlockReceiptsByHash(receipt.BlockHash)
+		require.NoError(t, err)
+		require.NotNil(t, receiptsByHash, "Transaction receipts by hash should not be nil")
+		for _, receipt := range receiptsByHash {
+			require.NoError(t, err)
+			require.NotNil(t, receipt)
+			log.Info(fmt.Sprintf("RealtimeGetBlockReceiptsByHash result type: %T", receipt))
+		}
+	})
+
 	t.Run("RealtimeEnabled", func(t *testing.T) {
 		// Test with valid "pending" tag
 		isEnabled, err := client.RealtimeEnabled()
@@ -440,7 +470,7 @@ func compareCacheWithSequenceDB(t *testing.T, dbDir, cacheDir string) {
 	copiedDbDir := filepath.Join(tempDbDir, filepath.Base(dbDir))
 
 	ctx := context.Background()
-	db, err := mdbx.NewMDBX(logger.New()).Path(copiedDbDir).Open(ctx)
+	db, err := mdbx.NewMDBX(log.New()).Path(copiedDbDir).Open(ctx)
 	require.NoError(t, err)
 	defer db.Close()
 

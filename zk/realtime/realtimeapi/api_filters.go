@@ -49,11 +49,11 @@ func (api *RealtimeAPIImpl) Realtime(ctx context.Context, criteria realtimeSub.S
 				result := RealtimeSubResult{}
 				sendFlag := false
 				if criteria.NewHeads && msg.BlockMsg != nil {
-					header, _, err := msg.BlockMsg.GetBlockInfo()
-					if err != nil {
+					// Send the latest confirmed block header
+					if err != nil || msg.BlockMsg.Header == nil {
 						log.Warn("[realtime subscription] error getting block info", "err", err)
 					}
-					result.Header = header
+					result.Header = msg.BlockMsg.Header
 					sendFlag = true
 				}
 

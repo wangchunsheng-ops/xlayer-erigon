@@ -395,7 +395,7 @@ BatchLoop:
 		logTicker.Reset(10 * time.Second)
 		// For X Layer block timer
 		blockTimer := time.NewTimer(cfg.zk.XLayer.SequencerMaxBlockSealTime)
-		ethBlockGasPool := new(core.GasPool).AddGas(transactionGasLimit) // used only in normalcy mode per block
+		ethBlockGasPool := new(core.GasPool).AddGas(cfg.zk.XLayer.DynamicBlockGasLimit) // used only in normalcy mode per block
 
 		if batchState.isL1Recovery() {
 			blockNumbersInBatchSoFar, err := batchContext.sdb.hermezDb.GetL2BlockNosByBatch(batchState.batchNumber)
@@ -459,8 +459,8 @@ BatchLoop:
 		processingTxTime := time.Now()
 
 		// For X Layer, realtime. Send kafka block header
-		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaBlockInfoChan != nil {
-			cfg.kafkaBlockInfoChan <- header
+		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaNewBlockInfoChan != nil {
+			cfg.kafkaNewBlockInfoChan <- header
 		}
 
 	OuterLoopTransactions:
@@ -774,10 +774,12 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+			commitSmtTime := time.Now()
 			blockCache := batchContext.sdb.eridb.RetriveAndCleanCache()
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+			metrics.GetLogStatistics().CumulativeTiming(metrics.SmtBatchCommitDBTiming, time.Since(commitSmtTime))
 			setTime := time.Now()
 			s.SetSmtCache(blockNumber, blockCache)
 			metrics.GetLogStatistics().CumulativeTiming(metrics.SetSmtCacheTiming, time.Since(setTime))
@@ -788,9 +790,11 @@ BatchLoop:
 				batchContext.sdb.eridb.RollbackBatch()
 				return err
 			}
+			commitSmtTime := time.Now()
 			if err := batchContext.sdb.eridb.CommitBatch(); err != nil {
 				return err
 			}
+			metrics.GetLogStatistics().CumulativeTiming(metrics.SmtBatchCommitDBTiming, time.Since(commitSmtTime))
 		}
 
 		// For X Layer
@@ -876,6 +880,10 @@ BatchLoop:
 
 		if err := streamWriter.WriteBlockDetailsToDatastream(batchState.forkId, batchState.batchNumber, batchState.builtBlocks); err != nil {
 			return err
+		}
+		// For X Layer, realtime
+		if cfg.zk.XLayer.Realtime.Enable && cfg.kafkaConfirmedBlockInfoChan != nil {
+			cfg.kafkaConfirmedBlockInfoChan <- block
 		}
 
 		// lets commit everything after updateStreamAndCheckRollback no matter of its result unless
