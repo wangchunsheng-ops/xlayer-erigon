@@ -47,6 +47,8 @@ func Init() {
 	prometheus.MustRegister(OperationTiming)
 	prometheus.MustRegister(OperationCounter)
 	prometheus.MustRegister(OperationGauge)
+	prometheus.MustRegister(SeqBlockGasUsed)
+	prometheus.MustRegister(RpcDynamicGasPrice)
 }
 
 // Block timing functions
@@ -152,16 +154,8 @@ func SetBlockNumber(gasUsed float64) {
 	OperationGauge.WithLabelValues("block", "number").Set(gasUsed)
 }
 
-func SetBlockGasUsed(gasUsed float64) {
-	OperationGauge.WithLabelValues("block", "gas_used").Set(gasUsed)
-}
-
 func SetBatchNumber(gasUsed float64) {
 	OperationGauge.WithLabelValues("batch", "number").Set(gasUsed)
-}
-
-func SetRpcDynamicGasPrice(gasPrice float64) {
-	OperationGauge.WithLabelValues("rpc", "dynamic_gas_price").Set(gasPrice)
 }
 
 // Counter functions
@@ -184,3 +178,18 @@ func IncBatchInvalidTxCount(invalidTxCount float64) {
 func IncRpcInnerTxExecuted(innerTxCount float64) {
 	OperationCounter.WithLabelValues("rpc", "inner_tx_count").Add(innerTxCount)
 }
+
+// Gas metrics
+var SeqBlockGasUsed = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "seq_block_gas_used",
+		Help: "Sequencer gas used per block",
+	},
+)
+
+var RpcDynamicGasPrice = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "rpc_dynamic_gas_price",
+		Help: "Rpc dynamic gas price",
+	},
+)

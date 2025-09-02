@@ -184,7 +184,7 @@ func (l *statisticsInstance) SummaryCheckpoint() string {
 	RecordBlockGetTxPauseTimingMs(blockGetTxPauseTiming)
 	IncBlockTxCount(float64(blockTx))
 	IncBlockInvalidTxCount(float64(blockInvalidTx))
-	SetBlockGasUsed(float64(blockGasUsed))
+	SeqBlockGasUsed.Set(float64(blockGasUsed))
 	RecordBlockSetSmtCacheTimingMs(setSmtCacheTiming)
 
 	l.mu.Lock()
