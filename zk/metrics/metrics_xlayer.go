@@ -52,99 +52,99 @@ func Init() {
 // Block timing functions
 func RecordBlockExecuteTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("block", "execute_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("block", "execute_timing").Set(seconds)
+	OperationTiming.WithLabelValues("block", "execute").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "execute").Set(seconds)
 }
 
 func RecordBlockProcessTxTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("block", "process_tx_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("block", "process_tx_timing").Set(seconds)
+	OperationTiming.WithLabelValues("block", "process_tx").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "process_tx").Set(seconds)
 }
 
 func RecordBlockGetTxTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("block", "get_tx_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("block", "get_tx_timing").Set(seconds)
+	OperationTiming.WithLabelValues("block", "get_tx").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "get_tx").Set(seconds)
 }
 
 func RecordBlockGetTxPauseTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("block", "get_tx_pause_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("block", "get_tx_pause_timing").Set(seconds)
+	OperationTiming.WithLabelValues("block", "get_tx_pause").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "get_tx_pause").Set(seconds)
 }
 
 func RecordBlockSetSmtCacheTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("block", "set_smt_cache_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("block", "set_smt_cache_timing").Set(seconds)
+	OperationTiming.WithLabelValues("block", "set_smt_cache").Observe(seconds)
+	OperationGauge.WithLabelValues("block", "set_smt_cache").Set(seconds)
 }
 
 // Batch timing functions
 func RecordBatchExecuteTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "execute_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "execute_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "execute").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "execute").Set(seconds)
 }
 
 func RecordBatchSequencingTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "sequencing_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "sequencing_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "sequencing").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "sequencing").Set(seconds)
 }
 
 func RecordBatchProcessTxTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "process_tx_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "process_tx_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "process_tx").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "process_tx").Set(seconds)
 }
 
 func RecordBatchGetTxTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "get_tx_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "get_tx_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "get_tx").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "get_tx").Set(seconds)
 }
 
 func RecordBatchGetTxPauseTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "get_tx_pause_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "get_tx_pause_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "get_tx_pause").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "get_tx_pause").Set(seconds)
 }
 
 func RecordBatchPbStateTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "pb_state_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "pb_state_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "pb_state").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "pb_state").Set(seconds)
 }
 
 func RecordBatchZkIncIntermediateHashesTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "zk_inc_intermediate_hashes_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "zk_inc_intermediate_hashes_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "zk_inc_intermediate_hashes").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "zk_inc_intermediate_hashes").Set(seconds)
 }
 
 func RecordBatchFinaliseBlockWriteTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "finalise_block_write_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "finalise_block_write_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "finalise_block_write").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "finalise_block_write").Set(seconds)
 }
 
 func RecordBatchSmtCommitDBTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "smt_commit_db_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "smt_commit_db_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "smt_commit_db").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "smt_commit_db").Set(seconds)
 }
 
 func RecordBatchCommitDBTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "commit_db_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "commit_db_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "commit_db").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "commit_db").Set(seconds)
 }
 
 func RecordBatchSetSmtCacheTimingMs(durationMs int64) {
 	seconds := float64(durationMs) / 1000.0
-	OperationTiming.WithLabelValues("batch", "set_smt_cache_timing").Observe(seconds)
-	OperationGauge.WithLabelValues("batch", "set_smt_cache_timing").Set(seconds)
+	OperationTiming.WithLabelValues("batch", "set_smt_cache").Observe(seconds)
+	OperationGauge.WithLabelValues("batch", "set_smt_cache").Set(seconds)
 }
 
 // Gauge functions
