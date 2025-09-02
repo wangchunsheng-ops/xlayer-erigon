@@ -239,6 +239,25 @@ test-e2e: stop all ## Runs group xlayer feature e2e tests checking race conditio
 	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../ci/e2e-1/...
 	echo "E2E tests passed"
 
+.PHONY: test-e2e-prune
+test-e2e-prune: stop all ## Runs group xlayer feature e2e tests checking race conditions
+	sleep 3
+	docker ps -a
+	MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../ci/e2e-1/...
+	echo "E2E tests passed, first tiime"
+	docker-compose stop xlayer-seq
+	sleep 10
+	if ! docker-compose up xlayer-prune; then \
+		echo "❌ Database pruning failed, stopping tests"; \
+		exit 1; \
+	fi
+	echo "✅ Database pruning completed successfully"
+	sleep 10
+	docker-compose up -d xlayer-seq
+	sleep 10
+	trap '$(STOP)' EXIT; MallocNanoZone=0 go test -count=1 -failfast -race -v -p 1 -timeout 600s ../ci/e2e-1/...
+	echo "E2E tests passed, first tiime"
+
 .PHONY: test-realtime-e2e
 test-realtime-e2e: stop realtime-run
 	sleep 3
