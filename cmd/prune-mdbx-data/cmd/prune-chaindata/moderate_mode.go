@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon/erigon-lib/kv"
 	logv3 "github.com/ledgerwatch/log/v3"
 )
 

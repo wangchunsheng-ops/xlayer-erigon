@@ -40,6 +40,15 @@ RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/go/pkg/mod \
     make db-tools
 
+# Add complete project source for building prune-tool
+ADD . .
+
+# Build prune-tool 
+RUN --mount=type=cache,target=/root/.cache \
+    --mount=type=cache,target=/tmp/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -o /app/build/bin/prune-tool ./cmd/prune-mdbx-data
+
 # Install dlv (Delve debugger)
 RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/tmp/go-build \
@@ -65,6 +74,7 @@ WORKDIR /home/erigon
 ## then give each binary its own layer
 COPY --from=tools-builder /app/build/bin/mdbx_copy /usr/local/bin/mdbx_copy
 COPY --from=tools-builder /app/build/bin/dlv /usr/local/bin/dlv
+COPY --from=tools-builder /app/build/bin/prune-tool /usr/local/bin/prune-tool
 COPY --from=builder /app/build/bin/cdk-erigon /usr/local/bin/cdk-erigon
 COPY --from=builder /app/build/bin/smt-db-split /usr/local/bin/smt-db-split
 COPY --from=builder /app/cmd/smt-db-split/prepare-db-split.sh /usr/local/bin/prepare-db-split.sh
