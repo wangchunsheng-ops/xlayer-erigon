@@ -35,8 +35,17 @@ func main() {
 }
 
 func runListTables(dbPath string) {
-	// Run the pre-compiled list-tables tool
-	runCmd := exec.Command("./list-tables-tool", dbPath)
+	// Try local tool first, then system PATH
+	toolName := "list-tables-tool"
+	if _, err := os.Stat("./" + toolName); os.IsNotExist(err) {
+		// Use tool from PATH (Docker environment)
+		toolName = toolName
+	} else {
+		// Use local tool (development environment)
+		toolName = "./" + toolName
+	}
+
+	runCmd := exec.Command(toolName, dbPath)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
 	if err := runCmd.Run(); err != nil {
@@ -52,8 +61,17 @@ func runPruneChaindata(args []string) {
 		os.Exit(1)
 	}
 
-	// Run the pre-compiled prune-chaindata tool
-	runCmd := exec.Command("./prune-chaindata-tool", args...)
+	// Try local tool first, then system PATH
+	toolName := "prune-chaindata-tool"
+	if _, err := os.Stat("./" + toolName); os.IsNotExist(err) {
+		// Use tool from PATH (Docker environment)
+		toolName = toolName
+	} else {
+		// Use local tool (development environment)
+		toolName = "./" + toolName
+	}
+
+	runCmd := exec.Command(toolName, args...)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
 	if err := runCmd.Run(); err != nil {
@@ -69,8 +87,17 @@ func runCompactDB(args []string) {
 		os.Exit(1)
 	}
 
-	// Run the pre-compiled compact-db tool
-	runCmd := exec.Command("./compact-db-tool", args...)
+	// Try local tool first, then system PATH
+	toolName := "compact-db-tool"
+	if _, err := os.Stat("./" + toolName); os.IsNotExist(err) {
+		// Use tool from PATH (Docker environment)
+		toolName = toolName
+	} else {
+		// Use local tool (development environment)
+		toolName = "./" + toolName
+	}
+
+	runCmd := exec.Command(toolName, args...)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
 	if err := runCmd.Run(); err != nil {
