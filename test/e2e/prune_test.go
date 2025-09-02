@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math/big"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	ethereum "github.com/ledgerwatch/erigon"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/core/types"
-	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/ethclient"
 
 	"github.com/ledgerwatch/erigon/test/operations"
@@ -308,11 +306,10 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 	t.Log("🚨 Step 4: Verifying pruned height exceptions (strict validation)...")
 
 	// === 🔴 COMPLETELY DISABLED interfaces - MUST FAIL ===
-
 	// Test eth_getTransactionByHash - MUST FAIL or return nil
 	t.Log("Testing eth_getTransactionByHash (MUST FAIL)...")
 	txAfter, _, errAfter := client.TransactionByHash(ctx, common.HexToHash(testData.TxHash))
-	require.True(t, errAfter != nil || txAfter == nil, "eth_getTransactionByHash should fail or return nil after aggressive pruning")
+	require.True(t, errAfter != nil || txAfter == nil, "eth_getTransactionByHash should fail or return nil after aggressive pruning (keep-recent-batches=1)")
 	t.Log("✅ eth_getTransactionByHash: Failed as expected")
 
 	// Test eth_getLogs - MUST return empty or fail
@@ -325,52 +322,52 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 	t.Log("Testing debug_traceTransaction (MUST FAIL)...")
 	traceResultAfter, errTraceAfter := operations.DebugTraceTransaction(common.HexToHash(testData.TxHash))
 	require.True(t, errTraceAfter != nil || traceResultAfter == nil,
-		"debug_traceTransaction should fail or return nil after transaction data is pruned")
+		"debug_traceTransaction should fail or return nil after transaction data is pruned (keep-recent-batches=1)")
 	t.Log("✅ debug_traceTransaction: Failed as expected")
 
 	// Test eth_getTransactionCount (historical) - MUST FAIL or return incorrect value
 	t.Log("Testing eth_getTransactionCount historical (MUST be incorrect)...")
 	nonceAfter, errNonceAfter := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
 	require.True(t, errNonceAfter != nil || nonceAfter != baselineData.Nonce,
-		"eth_getTransactionCount (historical) should fail or return incorrect value after account history is pruned")
+		"eth_getTransactionCount (historical) should fail or return incorrect value after account history is pruned (keep-recent-batches=1)")
 	t.Log("✅ eth_getTransactionCount (historical): Failed/incorrect as expected")
 
 	// === ⚠️ SEVERELY LIMITED interfaces - Document behavior but don't enforce strict failure ===
-	// Note: These interfaces are severely limited but may still work for recent batches (last 10)
+	// Note: These interfaces are severely limited but may still work for recent batches (last 1)
 	// We document the behavior but don't use strict assertions since the behavior is dependent on data age
 
 	// Test eth_getTransactionReceipt - Document limited access
-	t.Log("Testing eth_getTransactionReceipt (limited to recent batches)...")
+	t.Log("Testing eth_getTransactionReceipt (limited to recent 1 batch)...")
 	receiptAfter, errReceiptAfter := client.TransactionReceipt(ctx, common.HexToHash(testData.TxHash))
 	t.Logf("📊 eth_getTransactionReceipt: Error=%v, HasResult=%t", errReceiptAfter != nil, receiptAfter != nil)
 
 	// Test eth_getBlockByHash - Document limited access
-	t.Log("Testing eth_getBlockByHash (limited to recent batches)...")
+	t.Log("Testing eth_getBlockByHash (limited to recent 1 batch)...")
 	blockAfter, errBlockAfter := client.BlockByHash(ctx, testData.Receipt.BlockHash)
 	t.Logf("📊 eth_getBlockByHash: Error=%v, HasResult=%t", errBlockAfter != nil, blockAfter != nil)
 
 	// Test debug_traceBlockByHash - Document limited access
-	t.Log("Testing debug_traceBlockByHash (limited to recent batches)...")
+	t.Log("Testing debug_traceBlockByHash (limited to recent 1 batch)...")
 	blockTraceAfter, errBlockTraceAfter := operations.DebugTraceBlockByHash(testData.Receipt.BlockHash)
 	t.Logf("📊 debug_traceBlockByHash: Error=%v, HasResult=%t", errBlockTraceAfter != nil, blockTraceAfter != nil)
 
 	// Test debug_traceBlockByNumber - Document limited access
-	t.Log("Testing debug_traceBlockByNumber (limited to recent batches)...")
+	t.Log("Testing debug_traceBlockByNumber (limited to recent 1 batch)...")
 	blockTraceByNumAfter, errBlockTraceByNumAfter := operations.DebugTraceBlockByNumber(uint64(testData.Receipt.BlockNumber.Int64()))
 	t.Logf("📊 debug_traceBlockByNumber: Error=%v, HasResult=%t", errBlockTraceByNumAfter != nil, blockTraceByNumAfter != nil)
 
 	// Test eth_getBalance (historical) - Document limited access
-	t.Log("Testing eth_getBalance historical (limited to recent batches)...")
+	t.Log("Testing eth_getBalance historical (limited to recent 1 batch)...")
 	balanceHistoricalAfter, errBalanceHistoricalAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
 	t.Logf("📊 eth_getBalance (historical): Error=%v, HasResult=%t", errBalanceHistoricalAfter != nil, balanceHistoricalAfter != nil)
 
 	// Test eth_getCode (historical) - Document limited access
-	t.Log("Testing eth_getCode historical (limited to recent batches)...")
+	t.Log("Testing eth_getCode historical (limited to recent 1 batch)...")
 	codeAfter, errCodeAfter := client.CodeAt(ctx, testData.ContractAddress, testData.Receipt.BlockNumber)
 	t.Logf("📊 eth_getCode (historical): Error=%v, CodeLength=%d", errCodeAfter != nil, len(codeAfter))
 
 	// Test eth_getBlockTransactionCount - Document limited access
-	t.Log("Testing eth_getBlockTransactionCount (limited to recent batches)...")
+	t.Log("Testing eth_getBlockTransactionCount (limited to recent 1 batch)...")
 	txCountAfter, errTxCountAfter := client.TransactionCount(ctx, testData.Receipt.BlockHash)
 	t.Logf("📊 eth_getBlockTransactionCount: Error=%v, Count=%d", errTxCountAfter != nil, txCountAfter)
 
@@ -579,94 +576,6 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Log("   • Historical queries fail as expected")
 	t.Log("   • New data after pruning works perfectly")
 	t.Log("   • Node is suitable for current state queries only")
-}
-
-// Helper function to deploy a simple test contract
-func deployTestContract(t *testing.T, ctx context.Context, client *ethclient.Client) (common.Address, string) {
-	// Use the verified ERC20 contract from smoke_test.go
-	// This is a tested ERC20 token contract with standard functions
-	contractBytecode := "60806040523480156200001157600080fd5b506040518060400160405280600781526020017f4d79546f6b656e000000000000000000000000000000000000000000000000008152506040518060400160405280600381526020017f4d544b000000000000000000000000000000000000000000000000000000000081525081600390816200008f9190620004e4565b508060049081620000a19190620004e4565b505050620000e433620000b9620000ea60201b60201c565b600a620000c791906200075b565b6305f5e100620000d89190620007ac565b620000f360201b60201c565b620008e3565b60006012905090565b600073ffffffffffffffffffffffffffffffffffffffff168273ffffffffffffffffffffffffffffffffffffffff160362000165576040517f08c379a00000000000000000000000000000000000000000000000000000000081526004016200015c9062000858565b60405180910390fd5b62000179600083836200026060201b60201c565b80600260008282546200018d91906200087a565b92505081905550806000808473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1681526020019081526020016000206000828254019250508190555080600073ffffffffffffffffffffffffffffffffffffffff168373ffffffffffffffffffffffffffffffffffffffff167fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef60405160405180910390a3505050565b505050565b6000819050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052602260045260246000fd5b600060028204905060018216806200028c57607f821691505b6020821081036200029f576200029e62000244565b5b50919050565b60008190508160005260206000209050919050565b60006020601f8301049050919050565b600082821b905092915050565b600060088302620003097fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff82620002ca565b620003158683620002ca565b95508019841693508086168417925050509392505050565b6000819050919050565b6000819050919050565b6000620003626200035c62000356846200032d565b62000337565b6200032d565b9050919050565b6000819050919050565b6200037e8362000341565b620003966200038d8262000369565b848454620002d7565b825550505050565b600090565b620003ad6200039e565b620003ba81848462000373565b505050565b5b81811015620003e257620003d6600082620003a3565b600181019050620003c0565b5050565b601f82111562000431576200040081620002a5565b6200040b84620002ba565b810160208510156200041b578190505b620004336200042a85620002ba565b830182620003bf565b50505b505050565b600082821c905092915050565b60006200045b600019846008026200043b565b1980831691505092915050565b600062000476838362000448565b9150826002028217905092915050565b6200049182620001da565b67ffffffffffffffff811115620004ad57620004ac620001e5565b5b620004b9825462000273565b620004c6828285620003e6565b600060209050601f831160018114620004fe5760008415620004e9578287015190505b620004f5858262000468565b86555062000565565b601f1984166200050e86620002a5565b60005b8281101562000538578489015182556001820191506020850194506020810190506200051157600080fd5b8683101562000558578489015162000554601f89168262000448565b8355505b6001600288020188555050505b505050505050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b60008160011c9050919050565b6000808291508390505b6001851115620005fb57808604811115620005d357620005d26200056d565b5b6001851615620005e35780820291505b8081029050620005f3856200059c565b9450620005b3565b94509492505050565b60008262000616576001905062000729565b8162000626576000905062000729565b81600181146200063f57600281146200064a5762000680565b600191505062000729565b60ff8411156200065f576200065e6200056d565b5b8360020a9150848211156200067957620006786200056d565b5b5062000729565b5060208310610133068110518a00195020905b620006a08486869550600192034200060456600062000609565b831162000729565b92506001028205905092905050565b6000620007c260ff85168362000604565b9150620007d1828562000604565b92506020821015620007ef576000820191505b50929150506405f5e10030014006006260200"
-
-	auth, err := operations.GetAuth(operations.DefaultL2AdminPrivateKey, operations.DefaultL2ChainID)
-	require.NoError(t, err)
-
-	nonce, err := client.PendingNonceAt(ctx, auth.From)
-	require.NoError(t, err)
-
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	require.NoError(t, err)
-
-	deployTx := &types.LegacyTx{
-		CommonTx: types.CommonTx{
-			Nonce: nonce,
-			Gas:   300000,
-			Data:  common.FromHex(contractBytecode),
-		},
-		GasPrice: uint256.MustFromBig(gasPrice),
-	}
-
-	chainID, err := client.ChainID(ctx)
-	require.NoError(t, err)
-	signer := types.LatestSignerForChainID(chainID)
-
-	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
-	require.NoError(t, err)
-
-	signedTx, err := types.SignTx(deployTx, *signer, privateKey)
-	require.NoError(t, err)
-
-	err = client.SendTransaction(ctx, signedTx)
-	require.NoError(t, err)
-
-	err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
-	require.NoError(t, err)
-
-	receipt, err := client.TransactionReceipt(ctx, signedTx.Hash())
-	require.NoError(t, err)
-	require.NotNil(t, receipt.ContractAddress)
-
-	return receipt.ContractAddress, signedTx.Hash().Hex()
-}
-
-// Helper function to call contract function that emits events
-func callContractFunction(t *testing.T, ctx context.Context, client *ethclient.Client, contractAddr common.Address) string {
-	auth, err := operations.GetAuth(operations.DefaultL2AdminPrivateKey, operations.DefaultL2ChainID)
-	require.NoError(t, err)
-
-	nonce, err := client.PendingNonceAt(ctx, auth.From)
-	require.NoError(t, err)
-
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	require.NoError(t, err)
-
-	// Call totalSupply() function of ERC20 (function selector: 0x18160ddd)
-	callTx := &types.LegacyTx{
-		CommonTx: types.CommonTx{
-			Nonce: nonce,
-			To:    &contractAddr,
-			Gas:   100000,
-			Data:  common.FromHex("18160ddd"), // totalSupply() function selector
-		},
-		GasPrice: uint256.MustFromBig(gasPrice),
-	}
-
-	chainID, err := client.ChainID(ctx)
-	require.NoError(t, err)
-	signer := types.LatestSignerForChainID(chainID)
-
-	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
-	require.NoError(t, err)
-
-	signedTx, err := types.SignTx(callTx, *signer, privateKey)
-	require.NoError(t, err)
-
-	err = client.SendTransaction(ctx, signedTx)
-	require.NoError(t, err)
-
-	err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
-	require.NoError(t, err)
-
-	return signedTx.Hash().Hex()
 }
 
 // Helper function to trigger database pruning using Docker Compose
