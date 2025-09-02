@@ -25,7 +25,7 @@ var (
 
 	// OperationGauge tracks current state of operations
 	OperationGauge = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
+		prometheus.GaugeOpts{
 			Name: "xlayer_operation_current",
 			Help: "Current state of xlayer operations (timing in seconds, others in original units)",
 		},
@@ -148,8 +148,16 @@ func RecordBatchSetSmtCacheTimingMs(durationMs int64) {
 }
 
 // Gauge functions
+func SetBlockNumber(gasUsed float64) {
+	OperationGauge.WithLabelValues("block", "number").Set(gasUsed)
+}
+
 func SetBlockGasUsed(gasUsed float64) {
 	OperationGauge.WithLabelValues("block", "gas_used").Set(gasUsed)
+}
+
+func SetBatchNumber(gasUsed float64) {
+	OperationGauge.WithLabelValues("batch", "number").Set(gasUsed)
 }
 
 func SetRpcDynamicGasPrice(gasPrice float64) {

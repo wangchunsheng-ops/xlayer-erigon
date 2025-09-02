@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -174,6 +175,9 @@ func (l *statisticsInstance) SummaryCheckpoint() string {
 	log.Info(result)
 	// Report metrics to Prometheus
 	// Block level metrics
+	if blockNumber, err := strconv.ParseFloat(block, 64); err == nil {
+		SetBlockNumber(blockNumber)
+	}
 	RecordBlockExecuteTimingMs(blockDuration)
 	RecordBlockProcessTxTimingMs(blockProcessTxTiming)
 	RecordBlockGetTxTimingMs(blockGetTxTiming)
@@ -282,7 +286,9 @@ func (l *statisticsInstance) Summary() string {
 
 	// Report metrics to Prometheus
 	// Batch level metrics
-
+	if batchNumber, err := strconv.ParseFloat(batch, 64); err == nil {
+		SetBatchNumber(batchNumber)
+	}
 	RecordBatchExecuteTimingMs(batchDuration)
 	RecordBatchSequencingTimingMs(sequencingBatchTiming)
 	// Process transaction metrics
