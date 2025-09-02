@@ -575,3 +575,31 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+
+
+  # Database optimization service
+  xlayer-prune:
+    container_name: xlayer-prune
+    image: cdk-erigon
+    volumes:
+      - ./data/seq/:/home/erigon/data/
+    working_dir: /home/erigon
+    command: >
+      sh -c "
+        echo 'Step 1: Checking LOCK...' &&
+        if flock -n ./data/LOCK echo 'OK' 2>/dev/null; then
+          echo 'Step 2: Listing tables...'
+        else
+          echo 'ERROR: Node running! Stop xlayer-seq first'
+          exit 1
+        fi &&
+        prune-tool list-tables ./data &&
+        echo 'Step 3: Pruning...' &&
+        prune-tool prune-chaindata ./data aggressive --keep-recent-batches=10 --yes &&
+        echo 'Step 4: Compacting chaindata...' &&
+        prune-tool compact-db -source data/chaindata -in-place &&
+        echo 'Step 5: Compacting SMT...' &&
+        prune-tool compact-db -source data/smt -in-place -type smt &&
+        echo 'Step 6: Done!'
+      "
+    restart: "no"

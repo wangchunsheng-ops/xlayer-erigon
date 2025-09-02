@@ -578,3 +578,7 @@ vmtouch-evict:
 vmtouch-check:
 	docker exec -it xlayer-seq sh -c "vmtouch /home/erigon/data/chaindata/mdbx.dat"
 	docker exec -it xlayer-seq sh -c "vmtouch /home/erigon/data/smt/mdbx.dat"
+
+.PHONY: prune
+prune: ## Prune xlayer-seq database
+	$(DOCKER_COMPOSE) up xlayer-prune
