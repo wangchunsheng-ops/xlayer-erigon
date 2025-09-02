@@ -90,7 +90,7 @@ func PPXLayerTestnetGenesisBlock() *types.Genesis {
 		Timestamp:  1749551688,
 		GasLimit:   0x0,
 		Difficulty: big.NewInt(0x0),
-		Alloc:      readPrealloc("allocs/dynamic-ppxlayer-allocs.json"),
+		Alloc:      readPrealloc("allocs/xlayer-testnet.json"),
 	}
 }
 
