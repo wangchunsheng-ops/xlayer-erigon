@@ -583,6 +583,14 @@ func triggerDatabasePruning(t *testing.T) error {
 	// Execute real database pruning commands
 	t.Log("🔄 Executing REAL database pruning via Docker Compose...")
 
+	// Wait for data to age out of recent batch retention
+	t.Log("⏰ Waiting 60 seconds to ensure test data ages out of recent batches...")
+	t.Log("   • Batch seal time: 10s (from config)")
+	t.Log("   • Keep recent batches: 1")
+	t.Log("   • Waiting 60s = 6 batches to ensure test data is prunable")
+	time.Sleep(60 * time.Second)
+	t.Log("✅ Wait complete - test data should now be outside retention window")
+
 	// Step 1: Stop the sequencer node
 	t.Log("Step 1: Stopping xlayer-seq node...")
 	t.Log("🔄 Executing stop command: docker compose stop xlayer-seq")
