@@ -736,7 +736,8 @@ func (p *TxPool) RemoveTx(hash common.Hash) error {
 		//already removed
 	}
 	// update the related recorders
-	p.safeDiscardLocked(txMeta, SequencerAdminRemoval)
+	// Note: the transaction dropped by the admin can be resubmitted
+	p.safeDiscardLocked(txMeta, SequencerAdminRemoval, true)
 	log.Info("Admin RemoveTx success", "hash", hash, "timecost", common_util.PrettyDuration(time.Since(start)))
 	return nil
 }
@@ -1372,16 +1373,24 @@ func (p *TxPool) addLocked(mt *metaTx, announcements *types.Announcements) Disca
 // dropping transaction from all sub-structures and from db
 // Important: don't call it while iterating by all
 func (p *TxPool) discardLocked(mt *metaTx, reason DiscardReason) {
+	p.discardLockedImpl(mt, reason, false)
+}
+
+func (p *TxPool) discardLockedImpl(mt *metaTx, reason DiscardReason, canResubmit bool) {
 	delete(p.byHash, string(mt.Tx.IDHash[:]))
 	p.deletedTxs = append(p.deletedTxs, mt)
 	p.all.delete(mt)
+	if canResubmit {
+		return
+	}
+	// Note: if the transaction is in the discardReasonsLRU, the IdHashKnown check will forbid to re-submit the same transaction again
 	p.discardReasonsLRU.Add(string(mt.Tx.IDHash[:]), reason)
 }
 
-func (p *TxPool) safeDiscardLocked(mt *metaTx, reason DiscardReason) {
+func (p *TxPool) safeDiscardLocked(mt *metaTx, reason DiscardReason, canResubmit bool) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
-	p.discardLocked(mt, reason)
+	p.discardLockedImpl(mt, reason, canResubmit)
 }
 
 func (p *TxPool) NonceFromAddress(addr [20]byte) (nonce uint64, inPool bool) {

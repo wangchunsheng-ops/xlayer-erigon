@@ -87,126 +87,6 @@ func TestGetBatchSealTime(t *testing.T) {
 	require.Equal(t, maxTime, batchSealTime)
 }
 
-// Note: this function is used to test removeTransaction function for the sequencer
-func TestRemoveInvalidTransaferTokenFrom(t *testing.T) {
-	ctx := context.Background()
-	client, err := ethclient.Dial(operations.DefaultL2NetworkURL)
-	if err != nil {
-		log.Fatalf("Failed to connect to L2 client: %v", err)
-	}
-	log.Infof("======= Start TestInvalidTransaferTokenFrom and remove transaction ======")
-	// sealing case
-	var (
-		wg sync.WaitGroup
-	)
-	sealingTxsCount := 10
-	// transfer some token to the rich account
-	log.Infof("## init tokens to the rich account, from: %v, to: %v", operations.DefaultL2AdminAddress, operations.DefaultRichAddress)
-	adminNonce := getNonce(client, ctx, operations.DefaultL2AdminPrivateKey)
-	for i := 0; i < sealingTxsCount; i++ {
-		tx := generateSignedTokenTransferTx(t, ctx, client, operations.DefaultL2AdminPrivateKey,
-			new(uint256.Int).Mul(uint256.NewInt(2), uint256.NewInt(1e18)), operations.DefaultRichAddress, adminNonce+(uint64(i)))
-		err = client.SendTransaction(ctx, tx)
-		if err != nil {
-			log.Infof("* === !!! TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
-			return
-		}
-		err = operations.WaitTxToBeMined(ctx, client, tx, operations.DefaultTimeoutTxToBeMined)
-		if err != nil {
-			log.Infof("* === !!! TestInvalidTransaferTokenFrom: WaitTxToBeMined err when transfer token to the rich account, error: %v", err)
-		}
-	}
-	status, err := operations.TxPoolStatus()
-	require.NoError(t, err)
-	log.Infof("## Transaction status after init the rich account: %v", status)
-	log.Infof("### init tokens to the rich account success, from: %v, to: %v", operations.DefaultL2AdminAddress, operations.DefaultRichAddress)
-
-	// the rich account transactions(async)
-	richAccountNonce := getNonce(client, ctx, operations.DefaultRichPrivateKey)
-	wg.Add(1)
-	go func() {
-		log.Infof("* The rich account transfer tokens, richAccount: %v", operations.DefaultRichAddress)
-		for i := 0; i < sealingTxsCount; i++ {
-			tx := generateSignedTokenTransferTx(t, ctx, client, operations.DefaultRichPrivateKey,
-				new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultRichAddress, richAccountNonce+uint64(i))
-			err = client.SendTransaction(ctx, tx)
-			if err != nil {
-				log.Infof("* === !!! TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
-				return
-			}
-			err = operations.WaitTxToBeMined(ctx, client, tx, operations.DefaultTimeoutTxToBeMined)
-			if err != nil {
-				log.Infof("* === !!! TestInvalidTransaferTokenFrom: WaitTxToBeMined err when transfer token between the rich account, error: %v", err)
-				return
-			}
-		}
-		wg.Done()
-		status, err := operations.TxPoolStatus()
-		require.NoError(t, err)
-		log.Infof("* Transaction status after transfer token between the rich account: %v", status)
-		log.Infof("* The rich account transfer tokens success, richAccount: %v", operations.DefaultRichAddress)
-	}()
-
-	txsCount := 10
-	// all pending case
-	startNonce := getNonce(client, ctx, operations.DefaultL2AdminPrivateKey) + 1
-	txsToRemove := common.Hash{}
-	log.Infof("---The pending case test ---")
-	for i := 0; i < txsCount; i++ {
-		nonce := startNonce + (uint64(i))
-		log.Infof("* Submitting Pending transaction with discontinuous nonce, nonce: %v", nonce)
-		signedTx := generateSignedTokenTransferTx(t, ctx, client, operations.DefaultL2AdminPrivateKey,
-			new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, nonce)
-		if i == 0 {
-			txsToRemove = signedTx.Hash()
-		}
-		err = client.SendTransaction(ctx, signedTx)
-		if err != nil {
-			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
-			return
-		}
-	}
-	log.Infof("---Finish the pending case test ---")
-
-	status, err = operations.TxPoolStatus()
-	require.NoError(t, err)
-	log.Infof("* Transaction status before remove transaction: %v", status)
-	// remove the transaction
-	err = operations.RemoveTransaction(txsToRemove)
-	require.True(t, err == nil)
-	// check the transaction status
-	status, err = operations.TxPoolStatus()
-	require.NoError(t, err)
-	log.Infof("* Transaction status after remove transaction: %v", status)
-
-	// complement the transaction
-	log.Infof("---Test complement case ---")
-	startNonce -= 1
-	for i := 0; i < 2; i++ {
-		nonce := startNonce + uint64(i)
-		log.Infof("* Complement the transaction, nonce: %v ", nonce)
-		signedTx := generateSignedTokenTransferTx(t, ctx, client, operations.DefaultL2AdminPrivateKey,
-			new(uint256.Int).Mul(uint256.NewInt(100), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, nonce)
-		err = client.SendTransaction(ctx, signedTx)
-		if err != nil {
-			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: complement transaction and send err: %v", err)
-			return
-		}
-		err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
-		if err != nil {
-			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: WaitTxToBeMined err when complement the transaction, error: %v", err)
-		}
-	}
-	log.Infof("---Test complement case finish ---")
-	wg.Wait()
-	// check the transaction status
-	status, err = operations.TxPoolStatus()
-	require.NoError(t, err)
-	log.Infof("* Transaction status after complement the transaction: %v", status)
-
-	log.Infof("==== TestInvalidTransaferTokenFrom and remove transaction successfully ===")
-}
-
 func TestBridgeTx(t *testing.T) {
 	ctx := context.Background()
 	l1Client, err := ethclient.Dial(operations.DefaultL1NetworkURL)
@@ -370,6 +250,162 @@ func TestNewAccFreeGas(t *testing.T) {
 	err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
 	require.NoError(t, err)
 }
+
+// Note: this function is used to test removeTransaction function for the sequencer
+func TestSequencerRemoveInvalidTransferTokenFrom(t *testing.T) {
+	ctx := context.Background()
+	seqClient, err := ethclient.Dial(operations.DefaultL2SeqURL)
+	log.Infof("=== connect to : %v", operations.DefaultL2SeqURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to L2 client: %v", err)
+	}
+	log.Infof("======= Start TestInvalidTransaferTokenFrom and remove transaction ======")
+	// sealing case
+	var (
+		wg sync.WaitGroup
+	)
+	sealingTxsCount := 1000
+	txsList1 := []types.Transaction{}
+	// transfer some token to the rich account
+	log.Infof("## init tokens to the rich account, from: %v, to: %v", operations.DefaultL2AdminAddress, operations.DefaultRichAddress)
+	adminNonce := getNonce(seqClient, ctx, operations.DefaultL2AdminPrivateKey)
+	for i := 0; i < sealingTxsCount; i++ {
+		tx := generateSignedTokenTransferTx(t, ctx, seqClient, operations.DefaultL2AdminPrivateKey,
+			new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultRichAddress, adminNonce+(uint64(i)))
+		txsList1 = append(txsList1, tx)
+		err = seqClient.SendTransaction(ctx, tx)
+		if err != nil {
+			log.Infof("* === !!! TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
+		}
+		require.NoError(t, err)
+	}
+	// wait for mined
+	for _, tx1 := range txsList1 {
+		err := operations.WaitTxToBeMined(ctx, seqClient, tx1, operations.DefaultTimeoutTxToBeMined)
+		if err != nil {
+			log.Infof("* === !!! TestInvalidTransaferTokenFrom: WaitTxToBeMined err when transfer token to the rich account, error: %v", err)
+		}
+		require.NoError(t, err)
+	}
+
+	status, err := operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("## Transaction status after init the rich account: %v", status)
+	log.Infof("### init tokens to the rich account success, from: %v, to: %v", operations.DefaultL2AdminAddress, operations.DefaultRichAddress)
+
+	// the rich account transactions(async)
+	richAccountNonce := getNonce(seqClient, ctx, operations.DefaultRichPrivateKey)
+	wg.Add(1)
+	txsList2 := []types.Transaction{}
+	go func(ctx context.Context) {
+		defer wg.Done()
+		//log.Infof("* The rich account transfer tokens, richAccount: %v", operations.DefaultRichAddress)
+		for i := 0; i < sealingTxsCount-1; i++ {
+			tx := generateSignedTokenTransferTx(t, ctx, seqClient, operations.DefaultRichPrivateKey,
+				new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, richAccountNonce+uint64(i))
+			txsList2 = append(txsList2, tx)
+			sendErr := seqClient.SendTransaction(ctx, tx)
+			if sendErr != nil {
+				log.Infof("* === !!! TestInvalidTransaferTokenFrom: SendTransaction err: %v", sendErr)
+			}
+			require.NoError(t, sendErr)
+		}
+		for _, tx2 := range txsList2 {
+			errTransferToken := operations.WaitTxToBeMined(ctx, seqClient, tx2, operations.DefaultTimeoutTxToBeMined)
+			if errTransferToken != nil {
+				log.Infof("* === !!! TestInvalidTransaferTokenFrom: WaitTxToBeMined err when transfer token between the rich account, error: %v", errTransferToken)
+			}
+			require.NoError(t, errTransferToken)
+		}
+		txpoolStatus, err1 := operations.TxPoolStatus()
+		require.NoError(t, err1)
+		log.Infof("* Transaction status after transfer token between the rich account: %v", txpoolStatus)
+		log.Infof("* The rich account transfer tokens success, richAccount: %v", operations.DefaultRichAddress)
+	}(ctx)
+
+	txsCount := 1000
+	// all pending case
+	startNonce := getNonce(seqClient, ctx, operations.DefaultL2AdminPrivateKey) + 1
+	txsToRemove := common.Hash{}
+	log.Infof("---The pending case test ---")
+	txsList3 := []types.Transaction{}
+	for i := 0; i < txsCount; i++ {
+		nonce := startNonce + (uint64(i))
+		//log.Infof("* Submitting Pending transaction with discontinuous nonce, nonce: %v", nonce)
+		signedTx := generateSignedTokenTransferTx(t, ctx, seqClient, operations.DefaultL2AdminPrivateKey,
+			new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, nonce)
+		if i == 0 {
+			txsToRemove = signedTx.Hash()
+		} else {
+			txsList3 = append(txsList3, signedTx)
+		}
+		err = seqClient.SendTransaction(ctx, signedTx)
+		if err != nil {
+			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
+		}
+		require.NoError(t, err)
+	}
+	log.Infof("---Finish the pending case test ---")
+
+	status, err = operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("* Transaction status before remove transaction: %v", status)
+	// remove the transaction
+	log.Infof("* Remove transaction: %v, nonce: %v", txsToRemove.Hex(), startNonce)
+	err = operations.RemoveTransaction(operations.DefaultL2SeqURL, txsToRemove)
+	require.True(t, err == nil)
+	// check the transaction status
+	status, err = operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("* Transaction status after remove transaction: %v, nonce: %v", status, startNonce)
+
+	// complement the transaction
+	log.Infof("---Test complement case ---")
+	startNonce -= 1
+	for i := 0; i < 2; i++ {
+		nonce := startNonce + uint64(i)
+		log.Infof("* Complement the transaction, nonce: %v ", nonce)
+		signedTx := generateSignedTokenTransferTx(t, ctx, seqClient, operations.DefaultL2AdminPrivateKey,
+			new(uint256.Int).Mul(uint256.NewInt(1), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, nonce)
+		err = seqClient.SendTransaction(ctx, signedTx)
+		if err != nil {
+			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: complement transaction and send err: %v, txHash: %v", err, signedTx.Hash())
+		}
+		require.NoError(t, err)
+		txsList3 = append(txsList3, signedTx)
+	}
+	for _, tx3 := range txsList3 {
+		errSendComplementTx := operations.WaitTxToBeMined(ctx, seqClient, tx3, operations.DefaultTimeoutTxToBeMined)
+		if errSendComplementTx != nil {
+			log.Infof("* === !!!  TestInvalidTransaferTokenFrom: WaitTxToBeMined err when complement the transaction, error: %v", errSendComplementTx)
+		}
+		require.NoError(t, errSendComplementTx)
+	}
+
+	log.Infof("---Test complement case finish ---")
+	wg.Wait()
+	// check the transaction status
+	status, err = operations.TxPoolStatus()
+	require.NoError(t, err)
+	log.Infof("* Transaction status after complement the transaction: %v", status)
+	/// check the status
+	log.Infof("### check txpool status")
+	require.Equal(t, status["baseFee"].(string), "0x0")
+	require.Equal(t, status["pending"].(string), "0x0")
+	require.Equal(t, status["queued"].(string), "0x0")
+	log.Infof("### check txpool status success")
+	// check the on-chain information
+	log.Infof("### check chain status")
+	for _, complementTx := range txsList3 {
+		resultTx, pending, err := seqClient.TransactionByHash(ctx, complementTx.Hash())
+		require.NoError(t, err)
+		require.Equal(t, complementTx.Hash(), resultTx.Hash())
+		require.Equal(t, pending, false)
+	}
+	log.Infof("### check chain status success")
+	log.Infof("==== TestInvalidTransaferTokenFrom and remove transaction successfully ===")
+}
+
 func TestWhiteAndBlockList(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -636,8 +672,6 @@ func generateSignedTokenTransferTx(t *testing.T, ctx context.Context, client *et
 		Value: amount,
 	})
 	require.NoError(t, err)
-	log.Infof("gas: %d", gas)
-	log.Infof("gasPrice: %d", gasPrice)
 
 	var tx types.Transaction = &types.LegacyTx{
 		CommonTx: types.CommonTx{
@@ -655,6 +689,7 @@ func generateSignedTokenTransferTx(t *testing.T, ctx context.Context, client *et
 	signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
 	signedTx, err := types.SignTx(tx, *signer, privateKey)
 	require.NoError(t, err)
+	log.Infof("gas: %d, gasPrice: %d, nonce: %d, hash: %v", gas, gasPrice, nonce, signedTx.Hash().Hex())
 	return signedTx
 }
 
