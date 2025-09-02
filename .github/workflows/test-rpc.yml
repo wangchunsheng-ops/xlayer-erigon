@@ -1,0 +1,25 @@
+name: test-rpc
+
+on:
+  push:
+    branches:
+      - ns/wrk-rpc-test
+  #  schedule:
+  #    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    with:
+      ref: ns/wrk-rpc-test
+
+
+jobs:
+  eth:
+    uses: ./.github/workflows/test-rpc-template.yml
+    with:
+      namespace: eth
+      script: eth.sh
+
+  zkevm:
+    uses: ./.github/workflows/test-rpc-template.yml
+    with:
+      namespace: zkevm
+      script: zkevm.sh

@@ -1,0 +1,40 @@
+name: test-rpc-template
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        required: true
+        type: string
+      script:
+        required: true
+        type: string
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install wrk
+        run: |
+          git clone https://github.com/wg/wrk.git
+          cd wrk
+          make
+          sudo cp wrk /usr/local/bin
+
+      - name: Run wrk
+        run: chmod u+x ${{ inputs.script }} && bash ${{ inputs.script }}
+        working-directory: tests/stress-testing/scripts/${{ inputs.namespace }}
+
+      - name: Install wrk2
+        run: |
+          git clone https://github.com/giltene/wrk2.git
+          cd wrk2
+          make
+          sudo cp wrk /usr/local/bin/wrk2
+
+      - name: Run wrk2
+        run: chmod u+x ${{ inputs.script }} && bash ${{ inputs.script }}
+        working-directory: tests/stress-testing/scripts/${{ inputs.namespace }}

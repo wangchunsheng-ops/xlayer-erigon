@@ -1,0 +1,36 @@
+dofile("common.lua")
+methodName = "eth_getLogs"
+wrk.method = "POST"
+wrk.headers["Content-Type"] = "application/json"
+
+threads = {}
+counter = 1
+
+setup = function(thread)
+    thread:set("t_id",counter)
+    print("counter:"..counter)
+    counter = counter + 1
+    thread:set("counter_invalid", 0)
+    thread:set("counter_valid", 0)
+    thread:set("counter_failed", 0)
+    table.insert(threads,thread)
+    math.randomseed(os.time()+counter)
+end
+
+request = function()
+    local block = math.random(1,11107605) -- Adapted for 16 threads, 20,000 addresses parameter
+    local body = string.format(
+        '{"jsonrpc":"2.0","method":"eth_getLogs","params":[{ "fromBlock":"0x%X", "toBlock":"0x%X"}],"id":1}',
+        block, block+10
+    )
+    -- print(body)
+    headers = {}
+    headers["Content-Type"] = "application/json"
+    return wrk.format("POST",nil,headers,body)
+end
+
+response = handle_response
+
+done = function(summary, latency, requests)
+    print_summary(summary, latency, requests, threads, methodName)
+end

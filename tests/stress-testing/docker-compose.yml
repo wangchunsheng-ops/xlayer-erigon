@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  eth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eth
+    volumes:
+      - ./scripts:/scripts
+    command: ["-c", "cd /scripts/eth && /bin/bash eth.sh"]
+    network_mode: "host"
