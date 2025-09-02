@@ -27,8 +27,8 @@ import (
 // TestPruneRPC tests the impact of aggressive database pruning on core RPC interfaces.
 // This test performs REAL database pruning and verifies RPC interface behavior before/after.
 //
-// Comprehensive RPC Interface Testing (ALL 19 affected interfaces):
-// ==================================================================
+// Comprehensive RPC Interface Testing (19 affected interfaces, 15 actively tested):
+// ===============================================================================
 //
 // 🔴 COMPLETELY DISABLED after aggressive pruning (8 interfaces):
 //   - eth_getTransactionByHash    - Transaction lookup by hash (relies on BlockTransactionLookup table)
@@ -252,37 +252,28 @@ func verifyRPCBeforePruning(t *testing.T, ctx context.Context, client *ethclient
 
 	// Test debug_traceTransaction (using operations helper)
 	traceResult, err := operations.DebugTraceTransaction(common.HexToHash(testData.TxHash))
-	if err != nil {
-		t.Logf("⚠️ debug_traceTransaction: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, traceResult)
-		t.Log("✅ debug_traceTransaction: SUCCESS")
-	}
+	require.NoError(t, err, "debug_traceTransaction must work in test environment")
+	require.NotNil(t, traceResult, "debug_traceTransaction result must not be nil")
+	t.Log("✅ debug_traceTransaction: SUCCESS")
 
 	// Test debug_traceBlockByHash
 	blockTraceResult, err := operations.DebugTraceBlockByHash(testData.Receipt.BlockHash)
-	if err != nil {
-		t.Logf("⚠️ debug_traceBlockByHash: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, blockTraceResult)
-		t.Log("✅ debug_traceBlockByHash: SUCCESS")
-	}
+	require.NoError(t, err, "debug_traceBlockByHash must work in test environment")
+	require.NotNil(t, blockTraceResult, "debug_traceBlockByHash result must not be nil")
+	t.Log("✅ debug_traceBlockByHash: SUCCESS")
 
 	// Test debug_traceBlockByNumber
 	blockTraceByNumResult, err := operations.DebugTraceBlockByNumber(uint64(testData.Receipt.BlockNumber.Int64()))
-	if err != nil {
-		t.Logf("⚠️ debug_traceBlockByNumber: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, blockTraceByNumResult)
-		t.Log("✅ debug_traceBlockByNumber: SUCCESS")
-	}
+	require.NoError(t, err, "debug_traceBlockByNumber must work in test environment")
+	require.NotNil(t, blockTraceByNumResult, "debug_traceBlockByNumber result must not be nil")
+	t.Log("✅ debug_traceBlockByNumber: SUCCESS")
 
 	// Test trace_call, trace_callMany, trace_block, trace_filter (if available)
 	// Note: These trace_* methods might not be available in standard go-ethereum client
 	// They would typically be tested through direct RPC calls
 	t.Log("⚠️ trace_call, trace_callMany, trace_block, trace_filter: Skipped (require custom RPC implementation)")
 
-	t.Logf("✅ Step 2 Complete: Verified %d RPC interfaces work BEFORE pruning", 13)
+	t.Logf("✅ Step 2 Complete: Verified %d RPC interfaces work BEFORE pruning", 15)
 
 	// Return baseline data for comparison
 	return &BaselineData{
@@ -314,108 +305,107 @@ func executeDatabasePruning(t *testing.T) {
 
 // Step 4: Test pruned height exceptions (historical data should fail)
 func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *ethclient.Client, testData *TestData, baselineData *BaselineData) {
-	t.Log("🚨 Step 4: Verifying pruned height exceptions (historical data should fail)...")
+	t.Log("🚨 Step 4: Verifying pruned height exceptions (strict validation)...")
 
-	// Test eth_getTransactionByHash - Should FAIL (complete loss)
-	t.Log("Testing eth_getTransactionByHash for pruned data...")
+	// === 🔴 COMPLETELY DISABLED interfaces - MUST FAIL ===
+
+	// Test eth_getTransactionByHash - MUST FAIL or return nil
+	t.Log("Testing eth_getTransactionByHash (MUST FAIL)...")
 	txAfter, _, errAfter := client.TransactionByHash(ctx, common.HexToHash(testData.TxHash))
-	if errAfter != nil {
-		t.Logf("❌ eth_getTransactionByHash: FAILED as expected - %v", errAfter)
-	} else if txAfter == nil {
-		t.Log("❌ eth_getTransactionByHash: Returns nil (data deleted)")
-	} else {
-		t.Error("❌ eth_getTransactionByHash: Expected to fail but returned data")
-	}
+	require.True(t, errAfter != nil || txAfter == nil, "eth_getTransactionByHash should fail or return nil after aggressive pruning")
+	t.Log("✅ eth_getTransactionByHash: Failed as expected")
 
-	// Test eth_getLogs - Should FAIL (complete loss)
-	t.Log("Testing eth_getLogs for pruned data...")
+	// Test eth_getLogs - MUST return empty or fail
+	t.Log("Testing eth_getLogs (MUST return empty)...")
 	logsAfter, errLogsAfter := client.FilterLogs(ctx, baselineData.FilterQuery)
-	if errLogsAfter != nil {
-		t.Logf("❌ eth_getLogs: FAILED as expected - %v", errLogsAfter)
-	} else if len(logsAfter) == 0 {
-		t.Log("❌ eth_getLogs: Returns empty (index deleted)")
-	} else {
-		t.Errorf("❌ eth_getLogs: Expected to fail but found %d logs", len(logsAfter))
-	}
+	require.True(t, errLogsAfter != nil || len(logsAfter) == 0, "eth_getLogs should fail or return empty after log indexes are deleted")
+	t.Log("✅ eth_getLogs: Failed/empty as expected")
 
-	// Test eth_getTransactionReceipt - Should be LIMITED (only recent batches)
-	t.Log("Testing eth_getTransactionReceipt for pruned data...")
-	receiptAfter, errReceiptAfter := client.TransactionReceipt(ctx, common.HexToHash(testData.TxHash))
-	if errReceiptAfter != nil {
-		t.Logf("⚠️ eth_getTransactionReceipt: LIMITED as expected - %v", errReceiptAfter)
-	} else if receiptAfter == nil {
-		t.Log("⚠️ eth_getTransactionReceipt: Returns nil (old data pruned)")
-	} else {
-		t.Log("⚠️ eth_getTransactionReceipt: Still available (within recent 10 batches)")
-	}
-
-	// Test eth_getBlockByHash - Should be LIMITED (only recent batches)
-	t.Log("Testing eth_getBlockByHash for pruned data...")
-	blockAfter, errBlockAfter := client.BlockByHash(ctx, testData.Receipt.BlockHash)
-	if errBlockAfter != nil {
-		t.Logf("⚠️ eth_getBlockByHash: LIMITED as expected - %v", errBlockAfter)
-	} else if blockAfter == nil {
-		t.Log("⚠️ eth_getBlockByHash: Returns nil (old block pruned)")
-	} else {
-		t.Log("⚠️ eth_getBlockByHash: Still available (within recent 10 batches)")
-	}
-
-	// Test eth_getBalance (historical) - Should be LIMITED
-	t.Log("Testing eth_getBalance (historical) for pruned data...")
-	balanceHistoricalAfter, errBalanceHistoricalAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
-	if errBalanceHistoricalAfter != nil {
-		t.Logf("⚠️ eth_getBalance (historical): LIMITED as expected - %v", errBalanceHistoricalAfter)
-	} else if balanceHistoricalAfter == nil {
-		t.Log("⚠️ eth_getBalance (historical): Returns nil (historical data pruned)")
-	} else {
-		t.Log("⚠️ eth_getBalance (historical): Still available (within recent 10 batches)")
-	}
-
-	// Test eth_getCode (historical) - Should be LIMITED
-	t.Log("Testing eth_getCode (historical) for pruned data...")
-	codeAfter, errCodeAfter := client.CodeAt(ctx, testData.ContractAddress, testData.Receipt.BlockNumber)
-	if errCodeAfter != nil {
-		t.Logf("🟡 eth_getCode (historical): LIMITED as expected - %v", errCodeAfter)
-	} else if len(codeAfter) == 0 {
-		t.Log("🟡 eth_getCode (historical): Returns empty (historical data pruned)")
-	} else {
-		t.Log("🟡 eth_getCode (historical): Still available (within recent 10 batches)")
-	}
-
-	// Test eth_getTransactionCount (historical) - Should FAIL (complete loss)
-	t.Log("Testing eth_getTransactionCount (historical) for pruned data...")
-	nonceAfter, errNonceAfter := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
-	if errNonceAfter != nil {
-		t.Logf("❌ eth_getTransactionCount (historical): FAILED as expected - %v", errNonceAfter)
-	} else if nonceAfter != baselineData.Nonce {
-		t.Log("❌ eth_getTransactionCount (historical): Returns incorrect value (history corrupted)")
-	} else {
-		t.Error("❌ eth_getTransactionCount (historical): Expected to fail but returned correct data")
-	}
-
-	// Test eth_getBlockTransactionCount - Should be LIMITED
-	t.Log("Testing eth_getBlockTransactionCount for pruned data...")
-	txCountAfter, errTxCountAfter := client.TransactionCount(ctx, testData.Receipt.BlockHash)
-	if errTxCountAfter != nil {
-		t.Logf("⚠️ eth_getBlockTransactionCount: LIMITED as expected - %v", errTxCountAfter)
-	} else if txCountAfter == 0 {
-		t.Log("⚠️ eth_getBlockTransactionCount: Returns 0 (block data pruned)")
-	} else {
-		t.Log("⚠️ eth_getBlockTransactionCount: Still available (within recent 10 batches)")
-	}
-
-	// Test debug_traceTransaction - Should FAIL (complete loss)
-	t.Log("Testing debug_traceTransaction for pruned data...")
+	// Test debug_traceTransaction - MUST FAIL or return nil
+	t.Log("Testing debug_traceTransaction (MUST FAIL)...")
 	traceResultAfter, errTraceAfter := operations.DebugTraceTransaction(common.HexToHash(testData.TxHash))
-	if errTraceAfter != nil {
-		t.Logf("❌ debug_traceTransaction: FAILED as expected - %v", errTraceAfter)
-	} else if traceResultAfter == nil {
-		t.Log("❌ debug_traceTransaction: Returns nil (transaction data deleted)")
-	} else {
-		t.Error("❌ debug_traceTransaction: Expected to fail but returned data")
-	}
+	require.True(t, errTraceAfter != nil || traceResultAfter == nil,
+		"debug_traceTransaction should fail or return nil after transaction data is pruned")
+	t.Log("✅ debug_traceTransaction: Failed as expected")
 
-	t.Log("✅ Step 4 Complete: Verified pruned height exceptions (historical data properly fails)")
+	// Test eth_getTransactionCount (historical) - MUST FAIL or return incorrect value
+	t.Log("Testing eth_getTransactionCount historical (MUST be incorrect)...")
+	nonceAfter, errNonceAfter := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	require.True(t, errNonceAfter != nil || nonceAfter != baselineData.Nonce,
+		"eth_getTransactionCount (historical) should fail or return incorrect value after account history is pruned")
+	t.Log("✅ eth_getTransactionCount (historical): Failed/incorrect as expected")
+
+	// === ⚠️ SEVERELY LIMITED interfaces - Document behavior but don't enforce strict failure ===
+	// Note: These interfaces are severely limited but may still work for recent batches (last 10)
+	// We document the behavior but don't use strict assertions since the behavior is dependent on data age
+
+	// Test eth_getTransactionReceipt - Document limited access
+	t.Log("Testing eth_getTransactionReceipt (limited to recent batches)...")
+	receiptAfter, errReceiptAfter := client.TransactionReceipt(ctx, common.HexToHash(testData.TxHash))
+	t.Logf("📊 eth_getTransactionReceipt: Error=%v, HasResult=%t", errReceiptAfter != nil, receiptAfter != nil)
+
+	// Test eth_getBlockByHash - Document limited access
+	t.Log("Testing eth_getBlockByHash (limited to recent batches)...")
+	blockAfter, errBlockAfter := client.BlockByHash(ctx, testData.Receipt.BlockHash)
+	t.Logf("📊 eth_getBlockByHash: Error=%v, HasResult=%t", errBlockAfter != nil, blockAfter != nil)
+
+	// Test debug_traceBlockByHash - Document limited access
+	t.Log("Testing debug_traceBlockByHash (limited to recent batches)...")
+	blockTraceAfter, errBlockTraceAfter := operations.DebugTraceBlockByHash(testData.Receipt.BlockHash)
+	t.Logf("📊 debug_traceBlockByHash: Error=%v, HasResult=%t", errBlockTraceAfter != nil, blockTraceAfter != nil)
+
+	// Test debug_traceBlockByNumber - Document limited access
+	t.Log("Testing debug_traceBlockByNumber (limited to recent batches)...")
+	blockTraceByNumAfter, errBlockTraceByNumAfter := operations.DebugTraceBlockByNumber(uint64(testData.Receipt.BlockNumber.Int64()))
+	t.Logf("📊 debug_traceBlockByNumber: Error=%v, HasResult=%t", errBlockTraceByNumAfter != nil, blockTraceByNumAfter != nil)
+
+	// Test eth_getBalance (historical) - Document limited access
+	t.Log("Testing eth_getBalance historical (limited to recent batches)...")
+	balanceHistoricalAfter, errBalanceHistoricalAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	t.Logf("📊 eth_getBalance (historical): Error=%v, HasResult=%t", errBalanceHistoricalAfter != nil, balanceHistoricalAfter != nil)
+
+	// Test eth_getCode (historical) - Document limited access
+	t.Log("Testing eth_getCode historical (limited to recent batches)...")
+	codeAfter, errCodeAfter := client.CodeAt(ctx, testData.ContractAddress, testData.Receipt.BlockNumber)
+	t.Logf("📊 eth_getCode (historical): Error=%v, CodeLength=%d", errCodeAfter != nil, len(codeAfter))
+
+	// Test eth_getBlockTransactionCount - Document limited access
+	t.Log("Testing eth_getBlockTransactionCount (limited to recent batches)...")
+	txCountAfter, errTxCountAfter := client.TransactionCount(ctx, testData.Receipt.BlockHash)
+	t.Logf("📊 eth_getBlockTransactionCount: Error=%v, Count=%d", errTxCountAfter != nil, txCountAfter)
+
+	// === ✅ FULLY FUNCTIONAL interfaces - MUST WORK ===
+
+	// Test eth_getStorageAt - MUST WORK (relies on PlainState, preserved)
+	t.Log("Testing eth_getStorageAt (MUST work)...")
+	storageAfter, errStorageAfter := client.StorageAt(ctx, testData.ContractAddress, common.Hash{}, nil)
+	require.NoError(t, errStorageAfter, "eth_getStorageAt must work after pruning (relies on PlainState)")
+	require.NotNil(t, storageAfter, "eth_getStorageAt result must not be nil")
+	t.Log("✅ eth_getStorageAt: SUCCESS (current state preserved)")
+
+	// Test eth_call - MUST WORK (relies on PlainState, preserved)
+	t.Log("Testing eth_call (MUST work)...")
+	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2AdminAddress[2:]) // balanceOf(address)
+	callResultAfter, errCallAfter := client.CallContract(ctx, ethereum.CallMsg{
+		To:   &testData.ContractAddress,
+		Data: callData,
+	}, nil)
+	require.NoError(t, errCallAfter, "eth_call must work after pruning (relies on PlainState)")
+	require.NotNil(t, callResultAfter, "eth_call result must not be nil")
+	t.Log("✅ eth_call: SUCCESS (current state preserved)")
+
+	// Test eth_getBalance (current) - MUST WORK (relies on PlainState, preserved)
+	t.Log("Testing eth_getBalance current (MUST work)...")
+	balanceCurrentAfter, errBalanceCurrentAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), nil)
+	require.NoError(t, errBalanceCurrentAfter, "eth_getBalance (current) must work after pruning (relies on PlainState)")
+	require.NotNil(t, balanceCurrentAfter, "eth_getBalance (current) result must not be nil")
+	t.Log("✅ eth_getBalance (current): SUCCESS (current state preserved)")
+
+	// Document trace_* interfaces
+	t.Log("📝 trace_call, trace_callMany, trace_block, trace_filter: Would be COMPLETELY DISABLED")
+	t.Log("   These rely on CallFromIndex, CallToIndex, CallTraceSet tables which are deleted")
+
+	t.Log("✅ Step 4 Complete: Strict validation passed - pruning behavior verified")
 }
 
 // Step 5: Send new transactions after pruning
@@ -555,30 +545,21 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 
 	// Test debug_traceTransaction for new data - Should WORK
 	traceResult, err := operations.DebugTraceTransaction(common.HexToHash(newTestData.TxHash))
-	if err != nil {
-		t.Logf("⚠️ debug_traceTransaction: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, traceResult)
-		t.Log("✅ debug_traceTransaction: SUCCESS for new data")
-	}
+	require.NoError(t, err, "debug_traceTransaction must work for new data after pruning")
+	require.NotNil(t, traceResult, "debug_traceTransaction result must not be nil for new data")
+	t.Log("✅ debug_traceTransaction: SUCCESS for new data")
 
 	// Test debug_traceBlockByHash for new data - Should WORK
 	blockTraceResult, err := operations.DebugTraceBlockByHash(newTestData.Receipt.BlockHash)
-	if err != nil {
-		t.Logf("⚠️ debug_traceBlockByHash: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, blockTraceResult)
-		t.Log("✅ debug_traceBlockByHash: SUCCESS for new data")
-	}
+	require.NoError(t, err, "debug_traceBlockByHash must work for new data after pruning")
+	require.NotNil(t, blockTraceResult, "debug_traceBlockByHash result must not be nil for new data")
+	t.Log("✅ debug_traceBlockByHash: SUCCESS for new data")
 
 	// Test debug_traceBlockByNumber for new data - Should WORK
 	blockTraceByNumResult, err := operations.DebugTraceBlockByNumber(uint64(newTestData.Receipt.BlockNumber.Int64()))
-	if err != nil {
-		t.Logf("⚠️ debug_traceBlockByNumber: Not available in test environment - %v", err)
-	} else {
-		require.NotNil(t, blockTraceByNumResult)
-		t.Log("✅ debug_traceBlockByNumber: SUCCESS for new data")
-	}
+	require.NoError(t, err, "debug_traceBlockByNumber must work for new data after pruning")
+	require.NotNil(t, blockTraceByNumResult, "debug_traceBlockByNumber result must not be nil for new data")
+	t.Log("✅ debug_traceBlockByNumber: SUCCESS for new data")
 
 	t.Log("✅ Step 6 Complete: All interfaces work correctly for new data after pruning")
 
@@ -695,10 +676,15 @@ func triggerDatabasePruning(t *testing.T) error {
 
 	// Step 1: Stop the sequencer node
 	t.Log("Step 1: Stopping xlayer-seq node...")
+	t.Log("🔄 Executing stop command: docker compose stop xlayer-seq")
 	stopCmd := exec.Command("docker", "compose", "stop", "xlayer-seq")
 	stopCmd.Dir = ".." // Run from test parent directory
-	if output, err := stopCmd.CombinedOutput(); err != nil {
-		t.Logf("Stop command output: %s", string(output))
+
+	output, err := stopCmd.CombinedOutput()
+	// Always display the stop command output for detailed logging
+	t.Logf("📋 Stop command output:\n%s", string(output))
+
+	if err != nil {
 		return fmt.Errorf("failed to stop xlayer-seq: %v", err)
 	}
 	t.Log("✅ Node stopped successfully")
@@ -707,18 +693,29 @@ func triggerDatabasePruning(t *testing.T) error {
 	t.Log("Step 2: Running aggressive database pruning...")
 	pruneCmd := exec.Command("docker", "compose", "up", "xlayer-prune")
 	pruneCmd.Dir = ".." // Run from test parent directory
-	if output, err := pruneCmd.CombinedOutput(); err != nil {
-		t.Logf("Prune command output: %s", string(output))
+
+	t.Log("🔄 Executing prune command: docker compose up xlayer-prune")
+	output, err = pruneCmd.CombinedOutput()
+
+	// Always display the prune command output for detailed logging
+	t.Logf("📋 Prune command output:\n%s", string(output))
+
+	if err != nil {
 		return fmt.Errorf("failed to run database pruning: %v", err)
 	}
 	t.Log("✅ Database pruning completed")
 
 	// Step 3: Restart the sequencer node
 	t.Log("Step 3: Restarting xlayer-seq node...")
+	t.Log("🔄 Executing start command: docker compose up -d xlayer-seq")
 	startCmd := exec.Command("docker", "compose", "up", "-d", "xlayer-seq")
 	startCmd.Dir = ".." // Run from test parent directory
-	if output, err := startCmd.CombinedOutput(); err != nil {
-		t.Logf("Start command output: %s", string(output))
+
+	output, err = startCmd.CombinedOutput()
+	// Always display the start command output for detailed logging
+	t.Logf("📋 Start command output:\n%s", string(output))
+
+	if err != nil {
 		return fmt.Errorf("failed to restart xlayer-seq: %v", err)
 	}
 	t.Log("✅ Node restarted successfully")
