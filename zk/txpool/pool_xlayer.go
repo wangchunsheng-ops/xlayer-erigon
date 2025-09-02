@@ -142,9 +142,14 @@ func (p *TxPool) bestForXLayer(n uint16, txs *types.TxsRlp, tx kv.Tx, onTopOf, a
 	if len(readContext.toRemove) > 0 {
 		removeWG.Add(1)
 		go func() {
+			p.lock.Lock()
+			defer p.lock.Unlock()
 			removeWG.Done()
-			p.batchDiscardLocked(readContext.toRemove, UnsupportedTx)
-			p.pending.BatchRemove(readContext.toRemove)
+			for _, mt := range readContext.toRemove {
+				p.pending.Remove(mt)
+				p.discardLocked(mt, UnsupportedTx)
+				//log.Debug("Removed transaction from pending pool", "txID", mt.Tx.IDHash)
+			}
 		}()
 		time.Sleep(1 * time.Nanosecond)
 	}
@@ -183,8 +188,6 @@ func (p *TxPool) bestRead(n uint16, tx kv.Tx, onTopOf uint64, readContext *ReadC
 		}
 
 		if mt.Tx.Gas > p.GetDynamicBlockGasLimit() {
-			// remove the transaction with invalid gas-limit from the txpool
-			readContext.toRemove = append(readContext.toRemove, mt)
 			// Skip transactions with very large gas limit, these shouldn't enter the pool at all
 			//log.Debug("found a transaction in the pending pool with too high gas for tx - clear the tx pool")
 			//log.Trace("Skipping transaction with too high gas", "txID", mt.Tx.IDHash, "gas", mt.Tx.Gas)
@@ -448,13 +451,13 @@ func IsAcquireTxPoolLock() bool {
 }
 
 func (p *PendingPool) RemoveNoLock(i *metaTx) {
-	if i.worstIndex >= 0 {
+	if p.worst.Len() > 0 && i.worstIndex >= 0 {
 		heap.Remove(p.worst, i.worstIndex)
 	}
-	if i.bestIndex >= 0 {
+	if p.best.Len() > 0 && i.bestIndex >= 0 {
 		p.best.UnsafeRemove(i)
 	}
-	if i.bestIndex != p.best.Len()-1 {
+	if p.best.Len() > 0 && i.bestIndex != p.best.Len()-1 {
 		p.sorted.Swap(false)
 	}
 	i.currentSubPool = 0

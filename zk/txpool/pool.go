@@ -724,10 +724,19 @@ func (p *TxPool) RemoveTx(hash common.Hash) error {
 		log.Info("Admin RemoveTx failed for the tx not found", "hash", hash)
 		return errors.New("tx not found")
 	}
+	// remove the transaction from the corresponding pool
+	switch txMeta.currentSubPool {
+	case PendingSubPool:
+		p.pending.Remove(txMeta)
+	case BaseFeeSubPool:
+		p.baseFee.Remove(txMeta)
+	case QueuedSubPool:
+		p.queued.Remove(txMeta)
+	default:
+		//already removed
+	}
 	// update the related recorders
 	p.safeDiscardLocked(txMeta, SequencerAdminRemoval)
-	// remove the transaction from the pending pool
-	p.pending.Remove(txMeta)
 	log.Info("Admin RemoveTx success", "hash", hash, "timecost", common_util.PrettyDuration(time.Since(start)))
 	return nil
 }

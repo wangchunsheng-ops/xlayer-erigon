@@ -85,21 +85,15 @@ func TestGetBatchSealTime(t *testing.T) {
 	log.Infof("Max block time: %d, batchSealTime: %d", maxTime, batchSealTime)
 	require.Equal(t, maxTime, batchSealTime)
 }
+
+// Note: this function is used to test removeTransaction function for the sequencer
 func TestInvalidTransaferTokenFrom(t *testing.T) {
 	ctx := context.Background()
 	client, err := ethclient.Dial(operations.DefaultL2NetworkURL)
 	log.Infof("Start TestInvalidTransaferTokenFrom and remove transaction")
-	nonce := getNonce(client, ctx, "0x"+tmpSenderPrivateKey)
-	// send to non specific project sender
-	privateKeyNon, err := crypto.HexToECDSA(nonSpecificProjectSenderPrivateKay)
-	require.NoError(t, err)
-
-	publicKeyNon := privateKeyNon.Public()
-	publicKeyECDSANon, ok := publicKeyNon.(*ecdsa.PublicKey)
-	require.True(t, ok)
-	fromAddressNon := crypto.PubkeyToAddress(*publicKeyECDSANon)
-	signedTx := generateSignedTokenTransferTx(t, ctx, client, "0x"+tmpSenderPrivateKey,
-		new(uint256.Int).Mul(uint256.NewInt(100), uint256.NewInt(1e18)), fromAddressNon.String(), nonce+1)
+	nonce := getNonce(client, ctx, operations.DefaultL2AdminPrivateKey)
+	signedTx := generateSignedTokenTransferTx(t, ctx, client, operations.DefaultL2AdminPrivateKey,
+		new(uint256.Int).Mul(uint256.NewInt(100), uint256.NewInt(1e18)), operations.DefaultL2AdminAddress, nonce+1)
 	err = client.SendTransaction(ctx, signedTx)
 	if err != nil {
 		log.Infof("TestInvalidTransaferTokenFrom: SendTransaction err: %v", err)
@@ -522,7 +516,7 @@ func getNonce(client *ethclient.Client, ctx context.Context, fromPrivateKey stri
 	}
 	auth, err := operations.GetAuth(fromPrivateKey, chainID.Uint64())
 	if err != nil {
-		log.Infof("Get nonce err for get auth fialed: %v", err)
+		log.Infof("Get nonce err for get auth failed: %v", err)
 	}
 	nonce, err := client.PendingNonceAt(ctx, auth.From)
 	if err != nil {
@@ -539,7 +533,6 @@ func generateSignedTokenTransferTx(t *testing.T, ctx context.Context, client *et
 	chainID, err := client.ChainID(ctx)
 	require.NoError(t, err)
 	auth, err := operations.GetAuth(fromPrivateKey, chainID.Uint64())
-
 	gasPrice, err := client.SuggestGasPrice(ctx)
 	require.NoError(t, err)
 
