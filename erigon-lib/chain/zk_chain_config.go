@@ -3,7 +3,6 @@ package chain
 import "github.com/ledgerwatch/erigon-lib/chain/networkname"
 
 var chainIds = []uint64{
-	195,    // xlayer-testnet
 	196,    // xlayer-mainet
 	1101,   // mainnet
 	2440,   // cardona internal
@@ -15,7 +14,6 @@ var chainIds = []uint64{
 }
 
 var chainIdToName = map[uint64]string{
-	195:    networkname.XLayerTestnetChainName,
 	196:    networkname.XLayerMainnetChainName,
 	1101:   networkname.HermezMainnetChainName,
 	2440:   networkname.HermezBaliChainName,
