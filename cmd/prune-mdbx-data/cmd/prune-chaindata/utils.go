@@ -7,8 +7,8 @@ import (
 	"sort"
 
 	mdbx2 "github.com/erigontech/mdbx-go/mdbx"
-	"github.com/ledgerwatch/erigon/erigon-lib/kv"
-	mdbxpkg "github.com/ledgerwatch/erigon/erigon-lib/kv/mdbx"
+	"github.com/ledgerwatch/erigon-lib/kv"
+	mdbxpkg "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	logv3 "github.com/ledgerwatch/log/v3"
 )
 

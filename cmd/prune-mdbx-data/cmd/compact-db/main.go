@@ -12,9 +12,9 @@ import (
 
 	"github.com/c2h5oh/datasize"
 	"github.com/erigontech/mdbx-go/mdbx"
-	"github.com/ledgerwatch/erigon/erigon-lib/kv"
-	"github.com/ledgerwatch/erigon/erigon-lib/kv/backup"
-	mdbx2 "github.com/ledgerwatch/erigon/erigon-lib/kv/mdbx"
+	"github.com/ledgerwatch/erigon-lib/kv"
+	"github.com/ledgerwatch/erigon-lib/kv/backup"
+	mdbx2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	logv3 "github.com/ledgerwatch/log/v3"
 	"golang.org/x/sync/semaphore"
 )
