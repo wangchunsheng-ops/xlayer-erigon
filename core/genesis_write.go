@@ -725,8 +725,8 @@ func GenesisBlockByChainName(chain string) *types.Genesis {
 		return HermezBaliGenesisBlock()
 	case networkname.XLayerMainnetChainName:
 		return XLayerMainnetGenesisBlock()
-	case networkname.PPXLayerTestnetChainName:
-		return PPXLayerTestnetGenesisBlock()
+	case networkname.XLayerTestnetChainName:
+		return XLayerTestnetGenesisBlock()
 	default:
 		return DynamicGenesisBlock(chain)
 	}

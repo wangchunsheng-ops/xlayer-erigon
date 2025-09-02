@@ -9,7 +9,7 @@ const (
 	HermezBaliChainName              = "hermez-bali"
 	XLayerMainnetChainName           = "xlayer-mainnet"
 	HermezEtrogChainName             = "hermez-etrog"
-	PPXLayerTestnetChainName         = "dynamic-ppxlayer"
+	XLayerTestnetChainName           = "dynamic-ppxlayer"
 )
 
 var Zkevm = []string{
@@ -21,5 +21,5 @@ var Zkevm = []string{
 	HermezCardonaChainName,
 	HermezBaliChainName,
 	XLayerMainnetChainName,
-	PPXLayerTestnetChainName,
+	XLayerTestnetChainName,
 }
