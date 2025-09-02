@@ -96,6 +96,10 @@ func (cache *StateCache) FlushBlock(blockNum uint64) error {
 	cache.cacheLock.Lock()
 	defer cache.cacheLock.Unlock()
 
+	if cache.globalHeight == 0 {
+		return nil // Not initialized yet
+	}
+
 	if blockNum <= cache.globalHeight {
 		return nil
 	}
