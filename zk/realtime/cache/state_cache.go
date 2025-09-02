@@ -104,33 +104,33 @@ func (cache *StateCache) FlushBlock(blockNum uint64) error {
 		return nil
 	}
 
-	flushHeight := cache.globalHeight + 1
-	if flushHeight != blockNum {
-		return fmt.Errorf("block %d is not the next block to flush, global cache height: %d", blockNum, cache.globalHeight)
+	// Process all blocks from globalHeight+1 to blockNum
+	// This handles cases where blockNum might not be consecutive
+	for flushHeight := cache.globalHeight + 1; flushHeight <= blockNum; flushHeight++ {
+		bc, exists := cache.blocksCache[flushHeight]
+		if !exists {
+			return fmt.Errorf("failed to flush block %d, block state cache not found in state cache. global cache height: %d", flushHeight, cache.globalHeight)
+		}
+
+		// Verify the previous state reader is global for the first block in sequence
+		if !bc.isPrevGlobal.Load() {
+			return fmt.Errorf("failed to flush block %d, previous state reader is not global. global cache height: %d", flushHeight, cache.globalHeight)
+		}
+
+		// Flush global cache with this block's state
+		cache.globalCache.FlushState(bc.cache)
+		cache.globalHeight = flushHeight
+
+		// Update linked list - set the next block's previous reader to global cache
+		nbc := bc.nextBlockCache
+		if nbc != nil {
+			nbc.SetPrevStateReader(cache.globalCache, true)
+		}
+
+		// Remove from map and clear
+		delete(cache.blocksCache, flushHeight)
+		bc.Clear()
 	}
-
-	bc, exists := cache.blocksCache[blockNum]
-	if !exists {
-		return fmt.Errorf("failed to flush block %d, block state cache not found in state cache. global cache height: %d", blockNum, cache.globalHeight)
-	}
-
-	if !bc.isPrevGlobal.Load() && cache.globalHeight == blockNum-1 {
-		return fmt.Errorf("failed to flush block %d, previous state reader is not global. global cache height: %d", blockNum, cache.globalHeight)
-	}
-
-	// Flush global cache
-	cache.globalCache.FlushState(bc.cache)
-	cache.globalHeight = blockNum
-
-	// Update linked list
-	nbc := bc.nextBlockCache
-	if nbc != nil {
-		nbc.SetPrevStateReader(cache.globalCache, true)
-	}
-
-	// Remove from map
-	delete(cache.blocksCache, blockNum)
-	bc.Clear()
 
 	return nil
 }
