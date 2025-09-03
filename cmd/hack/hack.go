@@ -479,6 +479,27 @@ type GenesisData struct {
 	ParentBeaconBlockRoot string   `json:"parentBeaconBlockRoot,omitempty"` // EIP-4788
 }
 
+func writeJsonFile(data GenesisData, output string) error {
+	startJsonMarshal := time.Now()
+	updatedData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		logger.Error("encoding JSON", "error", err)
+		return err
+	}
+	logger.Info("json marshal", "elapsed", time.Since(startJsonMarshal))
+
+	logger.Info("output", "written to", output)
+
+	startJsonWrite := time.Now()
+	if err := os.WriteFile(output, updatedData, 0644); err != nil {
+		logger.Error("writing json file", "error", err)
+		return err
+	}
+	elapsedJsonWrite := time.Since(startJsonWrite)
+	logger.Info("complete json write", "elapsed", elapsedJsonWrite)
+	return nil
+}
+
 func migrateGenesis(chaindata, input, output string) error {
 	start := time.Now()
 	db := mdbx.MustOpen(chaindata)
@@ -515,11 +536,6 @@ func migrateGenesis(chaindata, input, output string) error {
 	var total uint64
 	var a accounts.Account
 
-	scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
-	if *ignoreScalable {
-		logger.Info("ignore scalable account", "account", scalableAddressStr)
-	}
-
 	startScanKeys := time.Now()
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
 		return tx.ForEach(kv.PlainState, nil, func(k, v []byte) error {
@@ -528,14 +544,6 @@ func migrateGenesis(chaindata, input, output string) error {
 			if len(k) == 20 {
 				acctCount++
 				acctHex := common.Bytes2Hex(k)
-
-				// ignore scalable account
-				if *ignoreScalable {
-					currentAddressStr := strings.ToLower(strings.TrimPrefix(acctHex, "0x"))
-					if currentAddressStr == scalableAddressStr {
-						return nil
-					}
-				}
 
 				// Fixme: if xlayer account balance or nonce conflict with target node(such as op-geth), currently we use op-geth
 				if _, exists := allocData[acctHex]; exists {
@@ -573,14 +581,6 @@ func migrateGenesis(chaindata, input, output string) error {
 				acctBytes := k[:20]
 				acctHex := common.Bytes2Hex(acctBytes)
 
-				// ignore scalable account
-				if *ignoreScalable {
-					currentAddressStr := strings.ToLower(strings.TrimPrefix(acctHex, "0x"))
-					if currentAddressStr == scalableAddressStr {
-						return nil
-					}
-				}
-
 				acc, ok := allocData[acctHex]
 				if !ok {
 					logger.Error("account state not found", "account", acctHex)
@@ -598,26 +598,20 @@ func migrateGenesis(chaindata, input, output string) error {
 	}
 	logger.Info("complete scan keys", "total acct count", acctCount, "storage count", storageCount, "total", total, "elapsed", time.Since(startScanKeys))
 
-	startJsonMarshal := time.Now()
-	updatedData, err := json.MarshalIndent(genesisData, "", "  ")
-	if err != nil {
-		logger.Error("encoding JSON", "error", err)
-		return err
-	}
-	logger.Info("json marshal", "elapsed", time.Since(startJsonMarshal))
-
 	if output == "" {
 		output = "state_dump.json"
 	}
-	logger.Info("output", "written to", output)
 
-	startJsonWrite := time.Now()
-	if err := os.WriteFile(output, updatedData, 0644); err != nil {
-		logger.Error("writing json file", "error", err)
-		return err
+	// write original genesis data
+	writeJsonFile(genesisData, output)
+
+	// ignore scalable account
+	if *ignoreScalable {
+		scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
+		logger.Info("ignore scalable account", "account", scalableAddressStr)
+		delete(allocData, scalableAddressStr)
+		writeJsonFile(genesisData, "no_scalable_"+output)
 	}
-	elapsedJsonWrite := time.Since(startJsonWrite)
-	logger.Info("complete json write", "elapsed", elapsedJsonWrite)
 
 	elapsed := time.Since(start)
 	logger.Info("completed", "total time elapsed", elapsed)

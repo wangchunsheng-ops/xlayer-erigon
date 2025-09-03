@@ -42,16 +42,14 @@ export smtdata_dir=$(pwd)/test/mainnet/seq/smt
 #export chaindata_dir=$(pwd)/test/data/seq/chaindata
 #export smtdata_dir=$(pwd)/test/data/seq/smt
 make hack
-# generate genesis dump file (including scalable)
-./build/bin/hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output xlayer_dump_file.json
-# generate genesis dump file ignoring scalable
-./build/bin/hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output xlayer_dump_no_scalable_file.json -ignore-scalable=true
+# generate genesis dump file (with and without scalable account)
+./build/bin/hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output xlayer_dump_file.json -ignore-scalable=true
 # check state root fast (including scalable)
 ./build/bin/hack -action checkStateRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input xlayer_dump_file.json
 # check state root fast (using json file with scalable, ignoring it during check)
 ./build/bin/hack -action checkStateRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input xlayer_dump_file.json -ignore-scalable=true
 # check state root fast (using json file without scalable)
-./build/bin/hack -action checkStateRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input xlayer_dump_no_scalable_file.json
+./build/bin/hack -action checkStateRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input no_scalable_xlayer_dump_file.json
 ```
 
 ## run differential smt verify
