@@ -487,9 +487,9 @@ func (s *Sync) PrintTimings() []interface{} {
 	var logCtx []interface{}
 	count := 0
 	for i := range s.timings {
-		if s.timings[i].took < 50*time.Millisecond {
-			continue
-		}
+		//if s.timings[i].took < 50*time.Millisecond {
+		//	continue
+		//}
 		count++
 		if count == 50 {
 			break
@@ -564,9 +564,18 @@ func (s *Sync) runStage(stage *Stage, db kv.RwDB, txc wrap.TxContainer, firstCyc
 
 	took := time.Since(start)
 	logPrefix := s.LogPrefix()
-	if took > 60*time.Second {
-		s.logger.Info(fmt.Sprintf("[%s] DONE", logPrefix), "in", took)
-	} else {
+
+	// 根据不同耗时范围打印不同级别的日志
+	switch {
+	case took > 60*time.Second:
+		s.logger.Error(fmt.Sprintf("[%s] DONE - CRITICAL SLOW", logPrefix), "in", took)
+	case took > 30*time.Second:
+		s.logger.Warn(fmt.Sprintf("[%s] DONE - VERY SLOW", logPrefix), "in", took)
+	case took > 10*time.Second:
+		s.logger.Warn(fmt.Sprintf("[%s] DONE - SLOW", logPrefix), "in", took)
+	case took > 3*time.Second:
+		s.logger.Info(fmt.Sprintf("[%s] DONE - TAKES TIME", logPrefix), "in", took)
+	default:
 		s.logger.Debug(fmt.Sprintf("[%s] DONE", logPrefix), "in", took)
 	}
 	s.timings = append(s.timings, Timing{stage: stage.ID, took: took})

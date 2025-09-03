@@ -71,7 +71,7 @@ func StageLoop(ctx context.Context,
 
 		// Estimate the current top height seen from the peer
 		err := StageLoopIteration(ctx, db, wrap.TxContainer{}, sync, initialCycle, logger, blockReader, hook, forcePartialCommit)
-
+		log.Info(fmt.Sprintf("StageLoopIteration cost=%dms, err=%v", time.Since(start).Milliseconds(), err))
 		if err != nil {
 			if errors.Is(err, libcommon.ErrStopped) || errors.Is(err, context.Canceled) {
 				return
@@ -105,7 +105,7 @@ func StageLoopIteration(ctx context.Context, db kv.RwDB, txc wrap.TxContainer, s
 			err = fmt.Errorf("%+v, trace: %s", rec, dbg.Stack())
 		}
 	}() // avoid crash because Erigon's core does many things
-
+	start := time.Now()
 	externalTx := txc.Tx != nil
 	headersProgressBefore, borProgressBefore, finishProgressBefore, err := stagesHeadersAndFinish(db, txc.Tx)
 	if err != nil {
@@ -152,6 +152,7 @@ func StageLoopIteration(ctx context.Context, db kv.RwDB, txc wrap.TxContainer, s
 		defer txc.Tx.Rollback()
 	}
 	_, err = sync.Run(db, txc, initialCycle)
+	log.Info(fmt.Sprintf("SyncRun cost=%dms, err=%v", time.Since(start).Milliseconds(), err))
 	if err != nil {
 		return err
 	}
@@ -179,14 +180,15 @@ func StageLoopIteration(ctx context.Context, db kv.RwDB, txc wrap.TxContainer, s
 			}
 		}
 	}
-	if canRunCycleInOneTransaction && !externalTx && commitTime > 500*time.Millisecond {
+	if canRunCycleInOneTransaction && !externalTx {
 		logger.Info("Commit cycle", "in", commitTime)
 	}
 	//if len(logCtx) > 0 { // No printing of timings or table sizes if there were no progress
+	readMemStart := time.Now()
 	var m runtime.MemStats
 	dbg.ReadMemStats(&m)
-	logCtx = append(logCtx, "alloc", libcommon.ByteCount(m.Alloc), "sys", libcommon.ByteCount(m.Sys))
-	logger.Info("Timings (slower than 50ms)", logCtx...)
+	logCtx = append(logCtx, "alloc", libcommon.ByteCount(m.Alloc), "sys", libcommon.ByteCount(m.Sys), "cost time(ms)", time.Since(readMemStart).Milliseconds())
+	logger.Info("SyncRun timings", logCtx...)
 
 	// -- send notifications END
 
