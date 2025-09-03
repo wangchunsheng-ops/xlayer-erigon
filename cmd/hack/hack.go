@@ -515,6 +515,11 @@ func migrateGenesis(chaindata, input, output string) error {
 	var total uint64
 	var a accounts.Account
 
+	scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
+	if *ignoreScalable {
+		logger.Info("ignore scalable account", "account", scalableAddressStr)
+	}
+
 	startScanKeys := time.Now()
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
 		return tx.ForEach(kv.PlainState, nil, func(k, v []byte) error {
@@ -523,6 +528,14 @@ func migrateGenesis(chaindata, input, output string) error {
 			if len(k) == 20 {
 				acctCount++
 				acctHex := common.Bytes2Hex(k)
+
+				// ignore scalable account
+				if *ignoreScalable {
+					currentAddressStr := strings.ToLower(strings.TrimPrefix(acctHex, "0x"))
+					if currentAddressStr == scalableAddressStr {
+						return nil
+					}
+				}
 
 				// Fixme: if xlayer account balance or nonce conflict with target node(such as op-geth), currently we use op-geth
 				if _, exists := allocData[acctHex]; exists {
@@ -559,6 +572,14 @@ func migrateGenesis(chaindata, input, output string) error {
 				storageCount++
 				acctBytes := k[:20]
 				acctHex := common.Bytes2Hex(acctBytes)
+
+				// ignore scalable account
+				if *ignoreScalable {
+					currentAddressStr := strings.ToLower(strings.TrimPrefix(acctHex, "0x"))
+					if currentAddressStr == scalableAddressStr {
+						return nil
+					}
+				}
 
 				acc, ok := allocData[acctHex]
 				if !ok {
@@ -2087,6 +2108,10 @@ func calcSmtRoot(input string) (*big.Int, error) {
 	fmt.Println("read json elapsed:", time.Since(start0))
 
 	alloc := jsonData["alloc"]
+	if *ignoreScalable {
+		scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
+		delete(alloc, scalableAddressStr)
+	}
 
 	nodeKvs := make([]*NodeKV, 0)
 	start1 := time.Now()
