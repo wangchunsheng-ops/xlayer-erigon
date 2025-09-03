@@ -7,9 +7,9 @@ const (
 	HermezESTestChainName            = "hermez-estest"
 	HermezCardonaChainName           = "hermez-cardona"
 	HermezBaliChainName              = "hermez-bali"
+	XLayerTestnetChainName           = "xlayer-testnet"
 	XLayerMainnetChainName           = "xlayer-mainnet"
 	HermezEtrogChainName             = "hermez-etrog"
-	XLayerTestnetChainName           = "dynamic-ppxlayer"
 )
 
 var Zkevm = []string{
@@ -20,6 +20,6 @@ var Zkevm = []string{
 	HermezEtrogChainName,
 	HermezCardonaChainName,
 	HermezBaliChainName,
-	XLayerMainnetChainName,
 	XLayerTestnetChainName,
+	XLayerMainnetChainName,
 }
