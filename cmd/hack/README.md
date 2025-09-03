@@ -36,6 +36,16 @@ hack -action checkStateRoot -chaindata ${chaindata_dir} -smt-db-path ${smtdata_d
 ```
 
 ## re-genesis state check ignoring scalable
+
+- Generate dump and check state under one command:
+```
+export chaindata_dir=$(pwd)/test/mainnet/seq/chaindata
+export smtdata_dir=$(pwd)/test/mainnet/seq/smt
+make hack
+./build/bin/hack -action migrateGenesisAndCheckRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input empty.json -output xlayer_dump_file.json -ignore-scalable=true
+```
+
+- Or use multiple commands:
 ```
 export chaindata_dir=$(pwd)/test/mainnet/seq/chaindata
 export smtdata_dir=$(pwd)/test/mainnet/seq/smt

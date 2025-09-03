@@ -479,6 +479,31 @@ type GenesisData struct {
 	ParentBeaconBlockRoot string   `json:"parentBeaconBlockRoot,omitempty"` // EIP-4788
 }
 
+func readJsonFile(input string) (GenesisData, error) {
+	var jsonData GenesisData
+	if input == "" {
+		input = "genesis.json"
+	}
+	logger.Info("input", "filename", input)
+
+	start0 := time.Now()
+	fileData, err := os.ReadFile(input)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Error("reading file", "error", err)
+			return GenesisData{}, err
+		}
+	} else {
+		if err := json.Unmarshal(fileData, &jsonData); err != nil {
+			logger.Error("decoding JSON", "error", err)
+			return GenesisData{}, err
+		}
+	}
+	logger.Info("read json", "elapsed", time.Since(start0))
+
+	return jsonData, nil
+}
+
 func writeJsonFile(data GenesisData, output string) error {
 	startJsonMarshal := time.Now()
 	updatedData, err := json.MarshalIndent(data, "", "  ")
@@ -500,8 +525,7 @@ func writeJsonFile(data GenesisData, output string) error {
 	return nil
 }
 
-func migrateGenesis(chaindata, input, output string) error {
-	start := time.Now()
+func scanDbGenerateGenesisData(input, chaindata string) (GenesisData, error) {
 	db := mdbx.MustOpen(chaindata)
 	defer db.Close()
 
@@ -510,18 +534,9 @@ func migrateGenesis(chaindata, input, output string) error {
 	if input == "" {
 		input = "genesis.json"
 	}
-	logger.Info("input", "filename", input)
-	fileData, err := os.ReadFile(input)
+	genesisData, err := readJsonFile(input)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			logger.Error("read file", "error", err)
-			return err
-		}
-	} else {
-		if err := json.Unmarshal(fileData, &genesisData); err != nil {
-			logger.Error("unmarshal json", "error", err)
-			return err
-		}
+		return GenesisData{}, err
 	}
 
 	if len(genesisData.Alloc) == 0 {
@@ -594,9 +609,20 @@ func migrateGenesis(chaindata, input, output string) error {
 			return nil
 		})
 	}); err != nil {
-		return err
+		return GenesisData{}, err
 	}
 	logger.Info("complete scan keys", "total acct count", acctCount, "storage count", storageCount, "total", total, "elapsed", time.Since(startScanKeys))
+
+	return genesisData, nil
+}
+
+func migrateGenesis(chaindata, input, output string) error {
+	start := time.Now()
+
+	genesisData, err := scanDbGenerateGenesisData(input, chaindata)
+	if err != nil {
+		return err
+	}
 
 	if output == "" {
 		output = "state_dump.json"
@@ -609,8 +635,40 @@ func migrateGenesis(chaindata, input, output string) error {
 	if *ignoreScalable {
 		scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
 		logger.Info("ignore scalable account", "account", scalableAddressStr)
-		delete(allocData, scalableAddressStr)
+		delete(genesisData.Alloc, scalableAddressStr)
 		writeJsonFile(genesisData, "no_scalable_"+output)
+	}
+
+	elapsed := time.Since(start)
+	logger.Info("completed", "total time elapsed", elapsed)
+	return nil
+}
+
+func migrateGenesisAndCheckRootFast(chaindata, smtdata, input, output string) error {
+	start := time.Now()
+
+	genesisData, err := scanDbGenerateGenesisData(input, chaindata)
+	if err != nil {
+		return err
+	}
+
+	checkStateRootFast(chaindata, smtdata, genesisData, false)
+	if err != nil {
+		return err
+	}
+
+	if output == "" {
+		output = "state_dump.json"
+	}
+
+	// ignore scalable account
+	if *ignoreScalable {
+		scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
+		logger.Info("ignore scalable account", "account", scalableAddressStr)
+		delete(genesisData.Alloc, scalableAddressStr)
+		writeJsonFile(genesisData, "no_scalable_"+output)
+	} else {
+		writeJsonFile(genesisData, output)
 	}
 
 	elapsed := time.Since(start)
@@ -1772,7 +1830,7 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 			if value.Storage != nil {
 				storageChanges[address] = make(map[string]string)
 				fmt.Printf("number of Storage items for account %s: %d\n", address.Hex(), len(value.Storage))
-				for k, _ := range value.Storage {
+				for k := range value.Storage {
 					keyHash := libcommon.HexToHash(k)
 					valInSmt, err := smtOrigin.ReadAccountStorage(address, 0, &keyHash)
 					if err != nil {
@@ -1960,36 +2018,52 @@ func checkStateRoot(chaindata, smtdata, input string, incremental, debug bool) e
 	return nil
 }
 
-func checkStateRootFast(chaindata, smtdata, input string) error {
+func checkStateRootFastInputFile(chaindata, smtdata, input string) error {
+	genesisData, err := readJsonFile(input)
+	if err != nil {
+		return err
+	}
 
-	var smtBatchRootHashOrigin *big.Int
-	if chaindata != "" {
-		ctx := context.Background()
-		db := mdbx.MustOpen(chaindata)
-		defer db.Close()
-		tx, err := db.BeginRw(ctx)
+	return checkStateRootFast(chaindata, smtdata, genesisData, *ignoreScalable)
+}
+
+func getSmtBatchRootHashOrigin(chaindata, smtdata string) (*big.Int, error) {
+	if chaindata == "" {
+		return nil, fmt.Errorf("chaindata is empty")
+	}
+
+	ctx := context.Background()
+	db := mdbx.MustOpen(chaindata)
+	defer db.Close()
+	tx, err := db.BeginRw(ctx)
+	if err != nil {
+		panic(err)
+	}
+	defer tx.Rollback()
+	var txsmt kv.RwTx = nil
+	if smtdata != "" {
+		fmt.Printf("Using split DB: %s\n", smtdata)
+		dbsmt := mdbx.MustOpen(*pathSmtDb)
+		defer dbsmt.Close()
+		txsmt, err = dbsmt.BeginRw(ctx)
 		if err != nil {
 			panic(err)
 		}
-		defer tx.Rollback()
-		var txsmt kv.RwTx = nil
-		if smtdata != "" {
-			fmt.Printf("Using split DB: %s\n", smtdata)
-			dbsmt := mdbx.MustOpen(*pathSmtDb)
-			defer dbsmt.Close()
-			txsmt, err = dbsmt.BeginRw(ctx)
-			if err != nil {
-				panic(err)
-			}
-			defer txsmt.Rollback()
-		}
-		eridb := db2.NewEriDb(txsmt, tx)
-		smtOrigin := smt.NewSMT(eridb, false)
-		smtBatchRootHashOrigin = smtOrigin.LastRoot()
-		fmt.Printf("*** smtBatchRootHashOrigin: %x\n", smtBatchRootHashOrigin)
+		defer txsmt.Rollback()
 	}
+	eridb := db2.NewEriDb(txsmt, tx)
+	smtOrigin := smt.NewSMT(eridb, false)
+	return smtOrigin.LastRoot(), nil
+}
 
-	smtBatchRootHashRebuild, err := calcSmtRoot(input)
+func checkStateRootFast(chaindata, smtdata string, genesisData GenesisData, ignoreScalable bool) error {
+	smtBatchRootHashOrigin, err := getSmtBatchRootHashOrigin(chaindata, smtdata)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("*** smtBatchRootHashOrigin: %x\n", smtBatchRootHashOrigin)
+
+	smtBatchRootHashRebuild, err := calcSmtRoot(genesisData, ignoreScalable)
 	if err != nil {
 		return err
 	}
@@ -2079,30 +2153,10 @@ func KeyContractStorageHack(ethaddr [8]uint64, storageKey string) utils.NodeKey 
 	return *utils.HashByPointers(&key1, hk0)
 }
 
-func calcSmtRoot(input string) (*big.Int, error) {
-	var jsonData map[string]map[string]AccInfo
-	if input == "" {
-		input = "genesis.json"
-	}
-	fmt.Printf("input: %s\n", input)
+func calcSmtRoot(genesisData GenesisData, ignoreScalable bool) (*big.Int, error) {
 
-	start0 := time.Now()
-	fileData, err := os.ReadFile(input)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Println("Error reading file:", err)
-			return nil, err
-		}
-	} else {
-		if err := json.Unmarshal(fileData, &jsonData); err != nil {
-			fmt.Println("Error decoding JSON:", err)
-			return nil, err
-		}
-	}
-	fmt.Println("read json elapsed:", time.Since(start0))
-
-	alloc := jsonData["alloc"]
-	if *ignoreScalable {
+	alloc := genesisData.Alloc
+	if ignoreScalable {
 		scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
 		delete(alloc, scalableAddressStr)
 	}
@@ -2584,9 +2638,15 @@ func main() {
 		}
 	case "checkStateRootFast":
 		if *standaloneSmtDb {
-			err = checkStateRootFast(*chaindata, *pathSmtDb, *input)
+			err = checkStateRootFastInputFile(*chaindata, *pathSmtDb, *input)
 		} else {
-			err = checkStateRootFast(*chaindata, "", *input)
+			err = checkStateRootFastInputFile(*chaindata, "", *input)
+		}
+	case "migrateGenesisAndCheckRootFast":
+		if *standaloneSmtDb {
+			err = migrateGenesisAndCheckRootFast(*chaindata, *pathSmtDb, *input, *output)
+		} else {
+			err = migrateGenesisAndCheckRootFast(*chaindata, "", *input, *output)
 		}
 	case "getSmtroot":
 		err = getSmtroot(*chaindata)
