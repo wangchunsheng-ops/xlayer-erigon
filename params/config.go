@@ -171,9 +171,9 @@ var (
 
 	HermezBaliChainConfig = readChainSpec("chainspecs/hermez-bali.json")
 
-	XLayerMainnetChainConfig = readChainSpec("chainspecs/xlayer-mainnet.json")
-
 	XLayerTestnetChainConfig = readChainSpec("chainspecs/xlayer-testnet.json")
+
+	XLayerMainnetChainConfig = readChainSpec("chainspecs/xlayer-mainnet.json")
 
 	CliqueSnapshot = NewSnapshotConfig(10, 1024, 16384, true, "")
 
