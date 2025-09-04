@@ -579,14 +579,16 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *
 
 	// Merge results from all workers
 	var totalStorage uint64
+	chunkCount := 0
 	for chunkStorage := range results {
+		chunkCount++
 		for k, v := range chunkStorage {
 			acct.Storage[k] = v
 		}
 		totalStorage += uint64(len(chunkStorage))
 	}
 
-	logger.Info("Scalable address total storage items", "count", totalStorage)
+	logger.Info("Scalable address total storage items", "count", totalStorage, "chunk count", chunkCount)
 	return nil
 }
 
