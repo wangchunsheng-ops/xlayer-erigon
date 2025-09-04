@@ -618,7 +618,7 @@ func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, acct *A
 		totalItems += len(chunkStorage)
 	}
 
-	fmt.Printf("Scalable address total storage items: %d\n", totalItems)
+	logger.Info("Scalable address total storage items", "count", totalItems)
 	return nil
 }
 
