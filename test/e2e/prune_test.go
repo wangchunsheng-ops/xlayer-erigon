@@ -129,8 +129,11 @@ func TestPruneRPC(t *testing.T) {
 func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Client) *TestData {
 	t.Log("🔄 Step 1: Generating test data...")
 
+	tmpHash := transTokenWithFrom(t, ctx, client, operations.DefaultL2AdminPrivateKey, uint256.NewInt(1000000000000000000), operations.DefaultL2NewAcc3Address)
+	t.Logf("Generated transaction: %s", tmpHash)
+
 	// Send a regular transaction to generate data
-	txHash := transToken(t, ctx, client, uint256.NewInt(1000000000000000000), operations.DefaultL2AdminAddress)
+	txHash := transTokenWithFrom(t, ctx, client, operations.DefaultL2NewAcc3PrivateKey, uint256.NewInt(100000000), operations.DefaultL2NewAcc3Address)
 	t.Logf("Generated transaction: %s", txHash)
 
 	// Wait a bit for transaction to be fully processed
@@ -142,7 +145,7 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 	t.Logf("Transaction mined in block: %s", receipt.BlockNumber.String())
 
 	// Generate additional test transactions
-	txHash2 := transToken(t, ctx, client, uint256.NewInt(2000000), operations.DefaultL2AdminAddress)
+	txHash2 := transTokenWithFrom(t, ctx, client, operations.DefaultL2NewAcc3PrivateKey, uint256.NewInt(100000000), operations.DefaultL2NewAcc3Address)
 	t.Logf("Generated second transaction: %s", txHash2)
 
 	receipt2, err := client.TransactionReceipt(ctx, common.HexToHash(txHash2))
@@ -151,11 +154,11 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 
 	// Use second transaction data as "contract" data for testing
 	// Since Receipt doesn't have To field, use the target address from our transaction
-	contractAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
+	contractAddress := common.HexToAddress(operations.DefaultL2NewAcc3Address)
 	contractTxHash := txHash2
 	logTxHash := txHash2 // Use same transaction for log testing
 
-	adminAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
+	adminAddress := common.HexToAddress(operations.DefaultL2NewAcc3Address)
 	nonce, err := client.PendingNonceAt(ctx, adminAddress)
 	require.NoError(t, err)
 	// build 1000 transactions in batch
@@ -173,7 +176,7 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 			},
 			GasPrice: uint256.NewInt(gasPrice),
 		}
-		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
+		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2NewAcc3PrivateKey, "0x"))
 		require.NoError(t, err)
 		signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
 		signedTx, err := types.SignTx(tx, *signer, privateKey)
@@ -248,19 +251,19 @@ func verifyRPCBeforePruning(t *testing.T, ctx context.Context, client *ethclient
 	t.Log("✅ eth_getStorageAt: SUCCESS")
 
 	// Test eth_getBalance (current)
-	balance, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), nil)
+	balance, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), nil)
 	require.NoError(t, err)
 	require.NotNil(t, balance)
 	t.Log("✅ eth_getBalance (current): SUCCESS")
 
 	// Test eth_getBalance (historical)
-	balanceHistorical, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	balanceHistorical, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), testData.Receipt.BlockNumber)
 	require.NoError(t, err)
 	require.NotNil(t, balanceHistorical)
 	t.Log("✅ eth_getBalance (historical): SUCCESS")
 
 	// Test eth_call (current)
-	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2AdminAddress[2:]) // balanceOf(address)
+	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2NewAcc3Address[2:]) // balanceOf(address)
 	callResult, err := client.CallContract(ctx, ethereum.CallMsg{
 		To:   &testData.ContractAddress,
 		Data: callData,
@@ -276,7 +279,7 @@ func verifyRPCBeforePruning(t *testing.T, ctx context.Context, client *ethclient
 	t.Logf("✅ eth_getCode (historical): SUCCESS, code length: %d", len(code))
 
 	// Test eth_getTransactionCount (historical)
-	nonce, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	nonce, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), testData.Receipt.BlockNumber)
 	require.NoError(t, err)
 	t.Logf("✅ eth_getTransactionCount (historical): SUCCESS, nonce=%d", nonce)
 
@@ -361,7 +364,7 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 
 	// Test eth_getTransactionCount (historical) - MUST FAIL or return incorrect value
 	t.Log("Testing eth_getTransactionCount historical (MUST be incorrect)...")
-	nonceAfter, errNonceAfter := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	nonceAfter, errNonceAfter := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), testData.Receipt.BlockNumber)
 	require.True(t, errNonceAfter != nil || nonceAfter != baselineData.Nonce,
 		"eth_getTransactionCount (historical) should fail or return incorrect value after account history is pruned (keep-recent-batches=1)")
 	t.Log("✅ eth_getTransactionCount (historical): Failed/incorrect as expected")
@@ -397,7 +400,7 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 
 	// Test eth_getBalance (historical) - Document limited access
 	t.Log("Testing eth_getBalance historical (limited to recent 1 batch)...")
-	balanceHistoricalAfter, errBalanceHistoricalAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), testData.Receipt.BlockNumber)
+	balanceHistoricalAfter, errBalanceHistoricalAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), testData.Receipt.BlockNumber)
 	t.Logf("📊 eth_getBalance (historical): Error=%v, HasResult=%t", errBalanceHistoricalAfter != nil, balanceHistoricalAfter != nil)
 
 	// Test eth_getCode (historical) - Document limited access
@@ -421,7 +424,7 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 
 	// Test eth_call - MUST WORK (relies on PlainState, preserved)
 	t.Log("Testing eth_call (MUST work)...")
-	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2AdminAddress[2:]) // balanceOf(address)
+	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2NewAcc3Address[2:]) // balanceOf(address)
 	callResultAfter, errCallAfter := client.CallContract(ctx, ethereum.CallMsg{
 		To:   &testData.ContractAddress,
 		Data: callData,
@@ -432,7 +435,7 @@ func verifyPrunedHeightExceptions(t *testing.T, ctx context.Context, client *eth
 
 	// Test eth_getBalance (current) - MUST WORK (relies on PlainState, preserved)
 	t.Log("Testing eth_getBalance current (MUST work)...")
-	balanceCurrentAfter, errBalanceCurrentAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), nil)
+	balanceCurrentAfter, errBalanceCurrentAfter := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), nil)
 	require.NoError(t, errBalanceCurrentAfter, "eth_getBalance (current) must work after pruning (relies on PlainState)")
 	require.NotNil(t, balanceCurrentAfter, "eth_getBalance (current) result must not be nil")
 	t.Log("✅ eth_getBalance (current): SUCCESS (current state preserved)")
@@ -449,7 +452,7 @@ func sendTransactionsAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Log("🔄 Step 5: Sending new transactions after pruning...")
 
 	// Send a regular transaction to generate new data
-	txHash := transToken(t, ctx, client, uint256.NewInt(2000000000000000000), operations.DefaultL2AdminAddress)
+	txHash := transTokenWithFrom(t, ctx, client, operations.DefaultL2NewAcc3PrivateKey, uint256.NewInt(100000000), operations.DefaultL2NewAcc3Address)
 	t.Logf("Generated new transaction after pruning: %s", txHash)
 
 	// Wait a bit for transaction to be fully processed
@@ -461,7 +464,7 @@ func sendTransactionsAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Logf("New transaction mined in block: %s", receipt.BlockNumber.String())
 
 	// Send another transaction after pruning
-	txHash2 := transToken(t, ctx, client, uint256.NewInt(3000000000000000000), operations.DefaultL2AdminAddress)
+	txHash2 := transTokenWithFrom(t, ctx, client, operations.DefaultL2NewAcc3PrivateKey, uint256.NewInt(100000000), operations.DefaultL2NewAcc3Address)
 	t.Logf("Generated second transaction after pruning: %s", txHash2)
 
 	// Use the second transaction for log testing
@@ -476,7 +479,7 @@ func sendTransactionsAfterPruning(t *testing.T, ctx context.Context, client *eth
 	return &TestData{
 		TxHash:          txHash,
 		Receipt:         receipt,
-		ContractAddress: common.HexToAddress(operations.DefaultL2AdminAddress), // Use admin address as placeholder
+		ContractAddress: common.HexToAddress(operations.DefaultL2NewAcc3Address), // Use admin address as placeholder
 		ContractTxHash:  txHash2,
 		LogTxHash:       logTxHash,
 	}
@@ -530,19 +533,19 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Log("✅ eth_getStorageAt: SUCCESS for new data")
 
 	// Test eth_getBalance (current) for new data - Should WORK
-	balance, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), nil)
+	balance, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), nil)
 	require.NoError(t, err)
 	require.NotNil(t, balance)
 	t.Log("✅ eth_getBalance (current): SUCCESS for new data")
 
 	// Test eth_getBalance (historical) for new data - Should WORK
-	balanceHistorical, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), newTestData.Receipt.BlockNumber)
+	balanceHistorical, err := client.BalanceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), newTestData.Receipt.BlockNumber)
 	require.NoError(t, err)
 	require.NotNil(t, balanceHistorical)
 	t.Log("✅ eth_getBalance (historical): SUCCESS for new data")
 
 	// Test eth_call (current) for new data - Should WORK
-	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2AdminAddress[2:]) // balanceOf(address)
+	callData := common.Hex2Bytes("70a08231000000000000000000000000" + operations.DefaultL2NewAcc3Address[2:]) // balanceOf(address)
 	callResult, err := client.CallContract(ctx, ethereum.CallMsg{
 		To:   &newTestData.ContractAddress,
 		Data: callData,
@@ -564,12 +567,12 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Logf("✅ eth_getCode (historical): SUCCESS for new data, code length: %d", len(codeHistorical))
 
 	// Test eth_getTransactionCount (current) for new data - Should WORK
-	nonce, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), nil)
+	nonce, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), nil)
 	require.NoError(t, err)
 	t.Logf("✅ eth_getTransactionCount (current): SUCCESS for new data, nonce=%d", nonce)
 
 	// Test eth_getTransactionCount (historical) for new data - Should WORK
-	nonceHistorical, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2AdminAddress), newTestData.Receipt.BlockNumber)
+	nonceHistorical, err := client.NonceAt(ctx, common.HexToAddress(operations.DefaultL2NewAcc3Address), newTestData.Receipt.BlockNumber)
 	require.NoError(t, err)
 	t.Logf("✅ eth_getTransactionCount (historical): SUCCESS for new data, nonce=%d", nonceHistorical)
 
