@@ -675,9 +675,9 @@ func migrateGenesis(chaindata, input, output string) error {
 				startAcctStorage := time.Now()
 				if acctHex == scalableAddressStr {
 
-					numOfWorkers := runtime.NumCPU()
+					//numOfWorkers := runtime.NumCPU()
 
-					err := processScalableAddressStorageConcurrently(tx, acctHex, k[:28], acc, numOfWorkers)
+					err := processScalableAddressStorageConcurrently(tx, acctHex, k[:28], acc, 32)
 					if err != nil {
 						logger.Error("processing scalable address storage", "error", err)
 					}
