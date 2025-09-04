@@ -504,12 +504,6 @@ func migrateGenesis(chaindata, input, output string) error {
 				acctCount++
 				acctHex := common.Bytes2Hex(k)
 
-				// Fixme: if xlayer account balance or nonce conflict with target node(such as op-geth), currently we use op-geth
-				if _, exists := allocData[acctHex]; exists {
-					logger.Warn("account state conflict found", "account", acctHex)
-					return nil
-				}
-
 				if err = a.DecodeForStorage(v); err != nil {
 					return err
 				}
@@ -530,6 +524,25 @@ func migrateGenesis(chaindata, input, output string) error {
 					acc.Code = hexutil.Encode(code)
 				}
 
+				if allocAcc, exists := allocData[acctHex]; exists {
+					logger.Warn("account state conflict found", "account", acctHex)
+					// black hole on XLayer with no code or storage
+					// WETH preinstalled on OP-stack
+					// so we use balance and nonce from xlayer, but code from op
+					// both xlayer and op have no storage for this address
+					if acctHex == "4200000000000000000000000000000000000006" {
+						allocAcc.Nonce = acc.Nonce
+						allocAcc.Balance = acc.Balance
+						if len(acc.Code) != 0 {
+							logger.Error("black hole has code", "code length", len(acc.Code))
+						}
+						if len(acc.Storage) != 0 {
+							logger.Error("black hole has storage", "storage length", len(acc.Storage))
+						}
+					}
+				}
+
+				// for any other addresses, we use acc from xlayer to replace that from op
 				allocData[acctHex] = &acc
 			}
 
