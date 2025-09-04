@@ -129,42 +129,6 @@ func TestPruneRPC(t *testing.T) {
 func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Client) *TestData {
 	t.Log("🔄 Step 1: Generating test data...")
 
-	adminAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
-	nonce, err := client.PendingNonceAt(ctx, adminAddress)
-	require.NoError(t, err)
-	// build 1000 transactions in batch
-	for i := 1; i < 1000; i++ {
-		gasPrice, err := operations.GetGasPrice()
-		require.NoError(t, err)
-
-		require.NoError(t, err)
-		var tx types.Transaction = &types.LegacyTx{
-			CommonTx: types.CommonTx{
-				Nonce: nonce,
-				To:    &adminAddress,
-				Gas:   21000,
-				Value: uint256.NewInt(0),
-			},
-			GasPrice: uint256.NewInt(gasPrice),
-		}
-		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
-		require.NoError(t, err)
-		signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
-		signedTx, err := types.SignTx(tx, *signer, privateKey)
-		require.NoError(t, err)
-		log.Infof("Get new GP:%v, TXGP:%v", gasPrice, tx.GetPrice())
-		err = client.SendTransaction(ctx, signedTx)
-		require.NoError(t, err)
-		time.Sleep(100 * time.Millisecond)
-		nonce++
-		if i%100 == 0 {
-			err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
-			log.Infof("Mined transaction: %s, nonce: %d", signedTx.Hash(), nonce)
-			require.NoError(t, err)
-		}
-	}
-	time.Sleep(10 * time.Second)
-
 	// Send a regular transaction to generate data
 	txHash := transToken(t, ctx, client, uint256.NewInt(1000000000000000000), operations.DefaultL2AdminAddress)
 	t.Logf("Generated transaction: %s", txHash)
@@ -190,6 +154,41 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 	contractAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
 	contractTxHash := txHash2
 	logTxHash := txHash2 // Use same transaction for log testing
+
+	adminAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
+	nonce, err := client.PendingNonceAt(ctx, adminAddress)
+	require.NoError(t, err)
+	// build 1000 transactions in batch
+	for i := 1; i < 1000; i++ {
+		gasPrice, err := operations.GetGasPrice()
+		require.NoError(t, err)
+
+		require.NoError(t, err)
+		var tx types.Transaction = &types.LegacyTx{
+			CommonTx: types.CommonTx{
+				Nonce: nonce,
+				To:    &adminAddress,
+				Gas:   21000,
+				Value: uint256.NewInt(0),
+			},
+			GasPrice: uint256.NewInt(gasPrice),
+		}
+		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
+		require.NoError(t, err)
+		signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
+		signedTx, err := types.SignTx(tx, *signer, privateKey)
+		require.NoError(t, err)
+		err = client.SendTransaction(ctx, signedTx)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+		nonce++
+		if i%100 == 0 {
+			err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
+			log.Infof("Mined transaction: %s, nonce: %d", signedTx.Hash(), nonce)
+			require.NoError(t, err)
+		}
+	}
+	time.Sleep(10 * time.Second)
 
 	t.Log("✅ Step 1 Complete: Test data generated successfully")
 	return &TestData{
@@ -622,14 +621,6 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 func triggerDatabasePruning(t *testing.T) error {
 	// Execute real database pruning commands
 	t.Log("🔄 Executing REAL database pruning via Docker Compose...")
-
-	// Wait for data to age out of recent batch retention
-	t.Log("⏰ Waiting 60 seconds to ensure test data ages out of recent batches...")
-	t.Log("   • Batch seal time: 10s (from config)")
-	t.Log("   • Keep recent batches: 1")
-	t.Log("   • Waiting 60s = 6 batches to ensure test data is prunable")
-	time.Sleep(60 * time.Second)
-	t.Log("✅ Wait complete - test data should now be outside retention window")
 
 	// Step 1: Stop the sequencer node
 	t.Log("Step 1: Stopping xlayer-seq node...")
