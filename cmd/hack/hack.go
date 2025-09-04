@@ -451,6 +451,173 @@ func BytesToPaddedHex(data []byte, length int) string {
 	return string(result)
 }
 
+type keyRange struct {
+	startKey []byte
+	endKey   []byte
+}
+
+func createKeyRangesForScalable(firstKey, lastKey []byte, numRanges int) []keyRange {
+	if numRanges <= 1 {
+		return []keyRange{{startKey: firstKey, endKey: lastKey}}
+	}
+
+	ranges := make([]keyRange, numRanges)
+
+	// Find the first byte that differs
+	diffByte := 0
+	for i := 0; i < len(firstKey) && i < len(lastKey); i++ {
+		if firstKey[i] != lastKey[i] {
+			diffByte = i
+			break
+		}
+	}
+
+	// Split based on the differing byte
+	byteRange := lastKey[diffByte] - firstKey[diffByte]
+	bytesPerRange := byteRange / byte(numRanges)
+
+	for i := 0; i < numRanges; i++ {
+		startKey := make([]byte, len(firstKey))
+		endKey := make([]byte, len(firstKey))
+
+		copy(startKey, firstKey)
+		copy(endKey, firstKey)
+
+		// Set the range for the differing byte
+		startByte := firstKey[diffByte] + byte(i)*bytesPerRange
+		endByte := firstKey[diffByte] + byte(i+1)*bytesPerRange
+
+		if i == 0 {
+			startByte = firstKey[diffByte]
+		}
+		if i == numRanges-1 {
+			endByte = lastKey[diffByte]
+		}
+
+		startKey[diffByte] = startByte
+		endKey[diffByte] = endByte
+
+		ranges[i] = keyRange{startKey: startKey, endKey: endKey}
+
+		fmt.Printf("Range %d: start=%x, end=%x\n", i, startKey, endKey)
+	}
+
+	return ranges
+}
+
+func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, acct *AccInfo, numWorkers int) error {
+	acctBytes := common.FromHex(acctHex)
+	acct.Storage = make(map[string]string)
+
+	// Get cursor for efficient range queries
+	cursor, err := tx.Cursor(kv.PlainState)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// Find the first key for this account
+	firstKey, _, err := cursor.Seek(acctBytes)
+	if err != nil {
+		return err
+	}
+
+	if firstKey == nil || !bytes.HasPrefix(firstKey, acctBytes) {
+		return nil // No storage found
+	}
+
+	// Find the last key by seeking to the next account
+	nextAccount := make([]byte, len(acctBytes))
+	copy(nextAccount, acctBytes)
+	// Increment the last byte to get the next account
+	for i := len(nextAccount) - 1; i >= 0; i-- {
+		if nextAccount[i] < 255 {
+			nextAccount[i]++
+			break
+		}
+		nextAccount[i] = 0
+	}
+
+	lastKey, _, err := cursor.Seek(nextAccount)
+	if err != nil {
+		return err
+	}
+
+	// If we found the next account, the last key is the previous one
+	if lastKey != nil && bytes.HasPrefix(lastKey, nextAccount) {
+		// Move back to get the last key of our account
+		lastKey, _, err = cursor.Prev()
+		if err != nil {
+			return err
+		}
+	}
+
+	if lastKey == nil || !bytes.HasPrefix(lastKey, acctBytes) {
+		return nil
+	}
+
+	fmt.Printf("Scalable address range: first_key=%x, last_key=%x\n", firstKey, lastKey)
+
+	// Create key ranges for concurrent processing
+	ranges := createKeyRangesForScalable(firstKey, lastKey, numWorkers)
+
+	// Process ranges concurrently
+	var wg sync.WaitGroup
+	results := make(chan map[string]string, len(ranges))
+
+	var acctStorageCount uint64 = 0
+	for i, keyRange := range ranges {
+		wg.Add(1)
+		go func(rangeIndex int, startKey, endKey []byte) {
+			defer wg.Done()
+
+			chunkStorage := make(map[string]string)
+			start := time.Now()
+
+			// Use Range to query this specific range
+			iter, err := tx.Range(kv.PlainState, startKey, endKey)
+			if err != nil {
+				logger.Error("range processing error", "range", rangeIndex, "error", err)
+			}
+
+			for iter.HasNext() {
+				storageK, storageV, err := iter.Next()
+				if err != nil {
+					logger.Error("range processing error", "range", rangeIndex, "error", err)
+				}
+				if len(storageK) > 20 && bytes.HasPrefix(storageK, acctBytes) {
+
+					acctStorageCount++
+					chunkStorage[hexutil.Encode(storageK[28:])] = BytesToPaddedHex(storageV, 64)
+				}
+			}
+
+			elapsed := time.Since(start)
+			fmt.Printf("Range %d processed %d items in %v\n", rangeIndex, len(chunkStorage), elapsed)
+
+			results <- chunkStorage
+		}(i, keyRange.startKey, keyRange.endKey)
+	}
+
+	// Wait for all ranges to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Merge results
+	totalItems := 0
+	for chunkStorage := range results {
+		for k, v := range chunkStorage {
+			acct.Storage[k] = v
+		}
+		totalItems += len(chunkStorage)
+	}
+
+	fmt.Printf("Scalable address total storage items: %d\n", totalItems)
+	return nil
+}
+
 func migrateGenesis(chaindata, input, output string) error {
 	start := time.Now()
 	db := mdbx.MustOpen(chaindata)
@@ -554,13 +721,19 @@ func migrateGenesis(chaindata, input, output string) error {
 
 				scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
 				startAcctStorage := time.Now()
-				tx.ForPrefix(kv.PlainState, k[:20], func(storageK, storageV []byte) error {
-					if len(storageK) > 20 {
-						acc.Storage[hexutil.Encode(storageK[28:])] = BytesToPaddedHex(storageV, 64)
-						acctStorageCount++
-					}
-					return nil
-				})
+				if acctHex == scalableAddressStr {
+					processScalableAddressStorageConcurrently(tx, acctHex, acc, runtime.NumCPU())
+
+				} else {
+					tx.ForPrefix(kv.PlainState, k[:20], func(storageK, storageV []byte) error {
+						if len(storageK) > 20 {
+							acc.Storage[hexutil.Encode(storageK[28:])] = BytesToPaddedHex(storageV, 64)
+							acctStorageCount++
+						}
+						return nil
+					})
+				}
+
 				elapsed := time.Since(startAcctStorage)
 				lastAcctPreprossed = acctStorageCount - 1
 				storageCount = storageCount + acctStorageCount
