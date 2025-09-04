@@ -522,6 +522,8 @@ func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, acct *A
 		return err
 	}
 
+	logger.Info("first key", "key", firstKey)
+
 	if firstKey == nil || !bytes.HasPrefix(firstKey, acctBytes) {
 		return nil // No storage found
 	}
@@ -537,6 +539,8 @@ func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, acct *A
 		}
 		nextAccount[i] = 0
 	}
+
+	logger.Info("next account key", "key", nextAccount)
 
 	lastKey, _, err := cursor.Seek(nextAccount)
 	if err != nil {
@@ -722,7 +726,10 @@ func migrateGenesis(chaindata, input, output string) error {
 				scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
 				startAcctStorage := time.Now()
 				if acctHex == scalableAddressStr {
-					processScalableAddressStorageConcurrently(tx, acctHex, acc, runtime.NumCPU())
+					err := processScalableAddressStorageConcurrently(tx, acctHex, acc, runtime.NumCPU())
+					if err != nil {
+						logger.Error("processing scalable address storage", "error", err)
+					}
 
 				} else {
 					tx.ForPrefix(kv.PlainState, k[:20], func(storageK, storageV []byte) error {
