@@ -510,9 +510,7 @@ type KeyRange struct {
 	End   []byte
 }
 
-func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, prefix []byte, acct *AccInfo, numWorkers int) error {
-	//acctBytes := common.FromHex(acctHex)
-	acct.Storage = make(map[string]string)
+func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefix []byte, acct *AccInfo, numWorkers int) error {
 
 	keyRanges := make([]KeyRange, numWorkers)
 
@@ -531,40 +529,69 @@ func processScalableAddressStorageConcurrently(tx kv.Tx, acctHex string, prefix 
 		keyRanges[i] = KeyRange{Start: startKey, End: endKey}
 	}
 
-	// Fixed chunk size
+	// Create channels for results
 	var wg sync.WaitGroup
+	results := make(chan map[string]string, numWorkers)
 
 	// Start workers
-	var totalStorage uint64 = 0
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 
-			keyRange := keyRanges[i]
+			keyRange := keyRanges[workerID]
 
-			// Get cursor for this worker
-			logger.Info("range", "worker id", i, "start", keyRange.Start, "end", keyRange.End)
-			iter, err := tx.Range(kv.PlainState, keyRange.Start, keyRange.End)
-			if err != nil {
-				logger.Error("failed to create cursor", "worker", workerID, "error", err)
-				return
-			}
+			// Create a new transaction for this worker using db.View
+			if err := db.View(context.Background(), func(workerTx kv.Tx) error {
+				chunkStorage := make(map[string]string)
+				start := time.Now()
 
-			for iter.HasNext() {
-				keyStorage, valStorage, err := iter.Next()
+				// Get cursor for this worker
+				logger.Info("range", "worker id", workerID, "start", keyRange.Start, "end", keyRange.End)
+				iter, err := workerTx.Range(kv.PlainState, keyRange.Start, keyRange.End)
 				if err != nil {
-					logger.Error("failed to read value from cursor", "worker", workerID, "error", err)
-					panic("failed to read value from cursor")
+					logger.Error("failed to create cursor", "worker", workerID, "error", err)
+					results <- chunkStorage
+					return err
 				}
-				acct.Storage[hexutil.Encode(keyStorage[28:])] = BytesToPaddedHex(valStorage, 64)
-				totalStorage++
-			}
 
+				var processedCount int
+				for iter.HasNext() {
+					keyStorage, valStorage, err := iter.Next()
+					if err != nil {
+						logger.Error("failed to read value from cursor", "worker", workerID, "error", err)
+						break
+					}
+					chunkStorage[hexutil.Encode(keyStorage[28:])] = BytesToPaddedHex(valStorage, 64)
+					processedCount++
+				}
+
+				elapsed := time.Since(start)
+				logger.Info("worker completed", "worker", workerID, "processed", processedCount, "elapsed", elapsed)
+
+				results <- chunkStorage
+				return nil
+			}); err != nil {
+				logger.Error("worker transaction failed", "worker", workerID, "error", err)
+				results <- make(map[string]string)
+			}
 		}(i)
 	}
 
-	wg.Wait()
+	// Wait for all workers to complete and close results channel
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Merge results from all workers
+	var totalStorage uint64
+	for chunkStorage := range results {
+		for k, v := range chunkStorage {
+			acct.Storage[k] = v
+		}
+		totalStorage += uint64(len(chunkStorage))
+	}
 
 	logger.Info("Scalable address total storage items", "count", totalStorage)
 	return nil
@@ -677,7 +704,7 @@ func migrateGenesis(chaindata, input, output string) error {
 
 					//numOfWorkers := runtime.NumCPU()
 
-					err := processScalableAddressStorageConcurrently(tx, acctHex, k[:28], acc, 32)
+					err := processScalableAddressStorageConcurrently(db, acctHex, k[:28], acc, 32)
 					if err != nil {
 						logger.Error("processing scalable address storage", "error", err)
 					}
