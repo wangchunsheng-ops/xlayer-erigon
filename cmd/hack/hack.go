@@ -572,8 +572,10 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *
 		}(i)
 	}
 
-	// Wait for all workers to complete and close results channel
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
 	// Merge results from all workers
 	var totalStorage uint64
