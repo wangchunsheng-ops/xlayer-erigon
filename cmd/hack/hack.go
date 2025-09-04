@@ -510,10 +510,11 @@ type KeyRange struct {
 	End   []byte
 }
 
-func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefix []byte, acct *AccInfo, numWorkers int) error {
+func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *AccInfo) error {
 
-	keyRanges := make([]KeyRange, numWorkers)
-
+	numWorkers := 32
+	keyRanges := make([]KeyRange, 32)
+	// split key ranges lexically
 	for i := 0; i < numWorkers; i++ {
 		startByte := byte(i * 8)
 		endByte := byte(i*8 + 7)
@@ -544,17 +545,14 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefi
 			// Create a new transaction for this worker using db.View
 			if err := db.View(context.Background(), func(workerTx kv.Tx) error {
 				chunkStorage := make(map[string]string)
-				start := time.Now()
-
 				// Get cursor for this worker
 				iter, err := workerTx.Range(kv.PlainState, keyRange.Start, keyRange.End)
 				if err != nil {
-					logger.Error("failed to create cursor", "worker", workerID, "error", err)
+					logger.Error("failed to create range iterator", "worker", workerID, "error", err)
 					results <- chunkStorage
 					return err
 				}
 
-				var processedCount int
 				for iter.HasNext() {
 					keyStorage, valStorage, err := iter.Next()
 					if err != nil {
@@ -562,11 +560,7 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefi
 						break
 					}
 					chunkStorage[hexutil.Encode(keyStorage[28:])] = BytesToPaddedHex(valStorage, 64)
-					processedCount++
 				}
-
-				elapsed := time.Since(start)
-				logger.Info("worker completed", "worker", workerID, "processed", processedCount, "elapsed", elapsed)
 
 				results <- chunkStorage
 				return nil
@@ -578,10 +572,7 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefi
 	}
 
 	// Wait for all workers to complete and close results channel
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	wg.Wait()
 
 	// Merge results from all workers
 	var totalStorage uint64
@@ -701,9 +692,8 @@ func migrateGenesis(chaindata, input, output string) error {
 				startAcctStorage := time.Now()
 				if acctHex == scalableAddressStr {
 
-					//numOfWorkers := runtime.NumCPU()
-
-					err := processScalableAddressStorageConcurrently(db, acctHex, k[:28], acc, 32)
+					logger.Info("scalable acct bytes", "bytes", acctBytes)
+					err := processScalableAddressStorageConcurrently(db, k[:28], acc)
 					if err != nil {
 						logger.Error("processing scalable address storage", "error", err)
 					}
