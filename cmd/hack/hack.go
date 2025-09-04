@@ -497,7 +497,12 @@ func migrateGenesis(chaindata, input, output string) error {
 
 	startScanKeys := time.Now()
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
+		var lastAcctPreprossed uint64 = 0
 		return tx.ForEach(kv.PlainState, nil, func(k, v []byte) error {
+			if lastAcctPreprossed > 0 {
+				lastAcctPreprossed--
+				return nil
+			}
 			total++
 			// account
 			if len(k) == 20 {
@@ -535,7 +540,7 @@ func migrateGenesis(chaindata, input, output string) error {
 
 			// storage
 			if len(k) > 28 {
-				storageCount++
+				var acctStorageCount uint64 = 0
 				acctBytes := k[:20]
 				acctHex := common.Bytes2Hex(acctBytes)
 
@@ -547,7 +552,16 @@ func migrateGenesis(chaindata, input, output string) error {
 					acc.Storage = make(map[string]string)
 				}
 
-				acc.Storage[hexutil.Encode(k[28:])] = BytesToPaddedHex(v, 64)
+				tx.ForPrefix(kv.PlainState, k[:20], func(storageK, storageV []byte) error {
+					if len(storageK) > 20 {
+						acc.Storage[hexutil.Encode(storageK[28:])] = BytesToPaddedHex(storageV, 64)
+						acctStorageCount++
+					}
+					return nil
+				})
+				lastAcctPreprossed = acctStorageCount - 1
+				storageCount = storageCount + acctStorageCount
+
 			}
 			return nil
 		})

@@ -18,9 +18,18 @@ make hack
 sudo DIST=/usr/local/bin make install 
 ```
 
+## mount ssd to memory
+```
+mkdir -p /mnt/ramdisk_op
+mount -t tmpfs -o size=128g tmpfs /mnt/ramdisk_op
+df -hT /mnt/ramdisk_op
+umount -l /mnt/ramdisk_op
+```
+
 ## run dump genesis
 ```
-export chaindata_dir=/data1/chaindata
+export chaindata_dir=/data/rpc-bak0820/chaindata
+cp -r ${chaindata_dir} /mnt/ramdisk_op/
 hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output pre_xlayer_dump_file.json -log-level info
 ```
 
@@ -33,6 +42,8 @@ export chaindata_dir=$(pwd)/data/seq/chaindata
 export smtdata_dir=$(pwd)/data/seq/smt
 hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -output xlayer_dump_file.json
 hack -action checkStateRoot -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -ignore-scalable=true -input xlayer_dump_file.json
+
+hack -action checkStateRootFast -chaindata ${chaindata_dir} -smt-db-path ${smtdata_dir} -standalone-smt-db=true -input xlayer_dump_file.json
 ```
 
 ## run differential smt verify
