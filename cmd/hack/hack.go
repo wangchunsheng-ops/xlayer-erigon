@@ -539,7 +539,7 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-
+			start := time.Now()
 			keyRange := keyRanges[workerID]
 
 			// Create a new transaction for this worker using db.View
@@ -563,6 +563,7 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *
 				}
 
 				results <- chunkStorage
+				logger.Info("worker completed", "id", workerID, "elapsed", time.Since(start))
 				return nil
 			}); err != nil {
 				logger.Error("worker transaction failed", "worker", workerID, "error", err)
