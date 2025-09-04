@@ -553,7 +553,7 @@ func migrateGenesis(chaindata, input, output string) error {
 				}
 
 				scalableAddressStr := strings.ToLower(strings.TrimPrefix(state.ADDRESS_SCALABLE_L2.Hex(), "0x"))
-
+				startAcctStorage := time.Now()
 				tx.ForPrefix(kv.PlainState, k[:20], func(storageK, storageV []byte) error {
 					if len(storageK) > 20 {
 						acc.Storage[hexutil.Encode(storageK[28:])] = BytesToPaddedHex(storageV, 64)
@@ -561,10 +561,11 @@ func migrateGenesis(chaindata, input, output string) error {
 					}
 					return nil
 				})
+				elapsed := time.Since(startAcctStorage)
 				lastAcctPreprossed = acctStorageCount - 1
 				storageCount = storageCount + acctStorageCount
 				if acctHex == scalableAddressStr {
-					fmt.Println("scanning for scalable, number of storages", acctStorageCount)
+					fmt.Println("scanning for scalable, number of storages", acctStorageCount, "elapsed", elapsed)
 				}
 
 			}
