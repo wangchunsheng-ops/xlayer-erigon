@@ -510,7 +510,7 @@ type KeyRange struct {
 	End   []byte
 }
 
-func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *AccInfo) error {
+func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *AccInfo) (uint64, error) {
 
 	numWorkers := 32
 	keyRanges := make([]KeyRange, 32)
@@ -589,7 +589,7 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, prefix []byte, acct *
 	}
 
 	logger.Info("Scalable address total storage items", "count", totalStorage, "chunk count", chunkCount)
-	return nil
+	return totalStorage, nil
 }
 
 func migrateGenesis(chaindata, input, output string) error {
@@ -698,7 +698,8 @@ func migrateGenesis(chaindata, input, output string) error {
 				if acctHex == scalableAddressStr {
 
 					logger.Info("scalable acct bytes", "bytes", acctBytes)
-					err := processScalableAddressStorageConcurrently(db, k[:28], acc)
+					scalableStorageCount, err := processScalableAddressStorageConcurrently(db, k[:28], acc)
+					acctStorageCount = scalableStorageCount
 					if err != nil {
 						logger.Error("processing scalable address storage", "error", err)
 					}
