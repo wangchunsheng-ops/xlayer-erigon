@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 	ethereum "github.com/ledgerwatch/erigon"
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon/core/types"
+	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/ethclient"
+	"github.com/ledgerwatch/erigon/zkevm/log"
 
 	"github.com/ledgerwatch/erigon/test/operations"
 
@@ -126,8 +129,44 @@ func TestPruneRPC(t *testing.T) {
 func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Client) *TestData {
 	t.Log("🔄 Step 1: Generating test data...")
 
+	adminAddress := common.HexToAddress(operations.DefaultL2AdminAddress)
+	nonce, err := client.PendingNonceAt(ctx, adminAddress)
+	require.NoError(t, err)
+	// build 1000 transactions in batch
+	for i := 1; i < 1000; i++ {
+		gasPrice, err := operations.GetGasPrice()
+		require.NoError(t, err)
+
+		require.NoError(t, err)
+		var tx types.Transaction = &types.LegacyTx{
+			CommonTx: types.CommonTx{
+				Nonce: nonce,
+				To:    &adminAddress,
+				Gas:   21000,
+				Value: uint256.NewInt(0),
+			},
+			GasPrice: uint256.NewInt(gasPrice),
+		}
+		privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
+		require.NoError(t, err)
+		signer := types.MakeSigner(operations.GetTestChainConfig(operations.DefaultL2ChainID), 1, 0)
+		signedTx, err := types.SignTx(tx, *signer, privateKey)
+		require.NoError(t, err)
+		log.Infof("Get new GP:%v, TXGP:%v", gasPrice, tx.GetPrice())
+		err = client.SendTransaction(ctx, signedTx)
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+		nonce++
+		if i%100 == 0 {
+			err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
+			log.Infof("Mined transaction: %s, nonce: %d", signedTx.Hash(), nonce)
+			require.NoError(t, err)
+		}
+	}
+	time.Sleep(10 * time.Second)
+
 	// Send a regular transaction to generate data
-	txHash := transToken(t, ctx, client, uint256.NewInt(1000000000000000000), operations.DefaultL2NewAcc1Address)
+	txHash := transToken(t, ctx, client, uint256.NewInt(1000000000000000000), operations.DefaultL2AdminAddress)
 	t.Logf("Generated transaction: %s", txHash)
 
 	// Wait a bit for transaction to be fully processed
@@ -411,7 +450,7 @@ func sendTransactionsAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Log("🔄 Step 5: Sending new transactions after pruning...")
 
 	// Send a regular transaction to generate new data
-	txHash := transToken(t, ctx, client, uint256.NewInt(2000000000000000000), operations.DefaultL2NewAcc2Address)
+	txHash := transToken(t, ctx, client, uint256.NewInt(2000000000000000000), operations.DefaultL2AdminAddress)
 	t.Logf("Generated new transaction after pruning: %s", txHash)
 
 	// Wait a bit for transaction to be fully processed
