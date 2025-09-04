@@ -540,6 +540,18 @@ func migrateGenesis(chaindata, input, output string) error {
 							logger.Error("black hole has storage", "storage length", len(acc.Storage))
 						}
 					}
+					// `create2Deployer` on both xlayer and op stack
+					// op uses a version of code that does not have an owner, so we use nonce and balance from xlayer, but the code from op
+					if acctHex == "13b0d85ccb8bf860b6b79af3029fca081ae9bef2" {
+						allocAcc.Nonce = acc.Nonce
+						allocAcc.Balance = acc.Balance
+						if len(allocAcc.Code) == 0 {
+							logger.Error("create2Deployer has no code")
+						}
+						if len(acc.Storage) != 0 {
+							logger.Error("create2Deployer has storage", "storage length", len(allocAcc.Storage))
+						}
+					}
 				}
 
 				// for any other addresses, we use acc from xlayer to replace that from op
