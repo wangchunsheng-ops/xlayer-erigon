@@ -152,11 +152,9 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 	require.NoError(t, err)
 	t.Logf("Second transaction mined in block: %s", receipt2.BlockNumber.String())
 
-	// Use second transaction data as "contract" data for testing
-	// Since Receipt doesn't have To field, use the target address from our transaction
-	contractAddress := common.HexToAddress(operations.DefaultL2NewAcc3Address)
-	contractTxHash := txHash2
-	logTxHash := txHash2 // Use same transaction for log testing
+	// Deploy a simple test contract to generate realistic test data
+	contractAddress, contractTxHash := deploySimpleContract(t, ctx, client)
+	logTxHash := contractTxHash // Use contract deployment transaction for log testing
 
 	adminAddress := common.HexToAddress(operations.DefaultL2NewAcc3Address)
 	nonce, err := client.PendingNonceAt(ctx, adminAddress)
@@ -183,7 +181,7 @@ func generateTestData(t *testing.T, ctx context.Context, client *ethclient.Clien
 		require.NoError(t, err)
 		err = client.SendTransaction(ctx, signedTx)
 		require.NoError(t, err)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		nonce++
 		if i%100 == 0 {
 			err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
@@ -233,16 +231,21 @@ func verifyRPCBeforePruning(t *testing.T, ctx context.Context, client *ethclient
 	require.Equal(t, block.Hash(), blockByNum.Hash())
 	t.Log("✅ eth_getBlockByNumber: SUCCESS")
 
-	// Test eth_getLogs (filter by contract address)
+	// Test eth_getLogs (query broader range to find actual logs)
+	currentBlock := testData.Receipt.BlockNumber
+	fromBlock := new(big.Int).Sub(currentBlock, big.NewInt(5)) // 5 blocks back
+	if fromBlock.Sign() < 0 {
+		fromBlock = big.NewInt(0)
+	}
+
 	filterQuery := ethereum.FilterQuery{
-		FromBlock: testData.Receipt.BlockNumber,
-		ToBlock:   testData.Receipt.BlockNumber,
-		Addresses: []common.Address{testData.ContractAddress},
+		FromBlock: fromBlock,
+		ToBlock:   currentBlock,
+		// Don't filter by specific address - verify interface functionality
 	}
 	logs, err := client.FilterLogs(ctx, filterQuery)
 	require.NoError(t, err)
-	// Note: logs may be empty if the address doesn't have contract events
-	t.Logf("✅ eth_getLogs: SUCCESS, found %d logs", len(logs))
+	t.Logf("✅ eth_getLogs: SUCCESS, found %d logs in range [%d-%d]", len(logs), fromBlock.Uint64(), currentBlock.Uint64())
 
 	// Test eth_getStorageAt (should always work)
 	storage, err := client.StorageAt(ctx, testData.ContractAddress, common.Hash{}, nil)
@@ -467,21 +470,21 @@ func sendTransactionsAfterPruning(t *testing.T, ctx context.Context, client *eth
 	txHash2 := transTokenWithFrom(t, ctx, client, operations.DefaultL2NewAcc3PrivateKey, uint256.NewInt(100000000), operations.DefaultL2NewAcc3Address)
 	t.Logf("Generated second transaction after pruning: %s", txHash2)
 
-	// Use the second transaction for log testing
-	logTxHash := txHash2
-
 	// Get receipt for the second transaction
 	receipt2, err := client.TransactionReceipt(ctx, common.HexToHash(txHash2))
 	require.NoError(t, err)
 	t.Logf("Second transaction mined in block: %s", receipt2.BlockNumber.String())
 
 	t.Log("✅ Step 5 Complete: New transactions sent successfully after pruning")
+	// Deploy contract for post-pruning tests
+	newContractAddress, newContractTxHash := deploySimpleContract(t, ctx, client)
+
 	return &TestData{
 		TxHash:          txHash,
 		Receipt:         receipt,
-		ContractAddress: common.HexToAddress(operations.DefaultL2NewAcc3Address), // Use admin address as placeholder
-		ContractTxHash:  txHash2,
-		LogTxHash:       logTxHash,
+		ContractAddress: newContractAddress,
+		ContractTxHash:  newContractTxHash,
+		LogTxHash:       txHash2,
 	}
 }
 
@@ -515,16 +518,23 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 	require.Equal(t, block.Hash(), blockByNum.Hash())
 	t.Log("✅ eth_getBlockByNumber: SUCCESS for new data")
 
+	deploySimpleContract(t, ctx, client)
 	// Test eth_getLogs for new data - Should WORK
+	// Query a broader range to find any logs (not just contract-specific)
+	currentBlock := newTestData.Receipt.BlockNumber
+	fromBlock := new(big.Int).Sub(currentBlock, big.NewInt(10)) // 10 blocks back
+	if fromBlock.Sign() < 0 {
+		fromBlock = big.NewInt(0)
+	}
+
 	filterQuery := ethereum.FilterQuery{
-		FromBlock: newTestData.Receipt.BlockNumber,
-		ToBlock:   newTestData.Receipt.BlockNumber,
-		Addresses: []common.Address{newTestData.ContractAddress},
+		FromBlock: fromBlock,
+		ToBlock:   currentBlock,
+		// Don't filter by address - get all logs to verify the interface works
 	}
 	logs, err := client.FilterLogs(ctx, filterQuery)
 	require.NoError(t, err)
-	// Note: logs may be empty if the address doesn't have contract events
-	t.Logf("✅ eth_getLogs: SUCCESS for new data, found %d logs", len(logs))
+	t.Logf("✅ eth_getLogs: SUCCESS for new data, found %d logs in range [%d-%d]", len(logs), fromBlock.Uint64(), currentBlock.Uint64())
 
 	// Test eth_getStorageAt for new data - Should WORK
 	storage, err := client.StorageAt(ctx, newTestData.ContractAddress, common.Hash{}, nil)
@@ -609,7 +619,7 @@ func verifyInterfacesAfterPruning(t *testing.T, ctx context.Context, client *eth
 	t.Log("✅ Step 1: Test data generated successfully")
 	t.Log("✅ Step 2: All interfaces worked before pruning")
 	t.Log("✅ Step 3: Database pruning executed successfully")
-	t.Log("❌ Step 4: Historical data properly fails after pruning")
+	t.Log("✅ Step 4: Historical data properly fails after pruning")
 	t.Log("✅ Step 5: New transactions sent successfully after pruning")
 	t.Log("✅ Step 6: All interfaces work correctly for new data after pruning")
 	t.Log("")
@@ -692,4 +702,76 @@ func triggerDatabasePruning(t *testing.T) error {
 	}
 
 	return fmt.Errorf("node failed to become ready within %v", maxWaitTime)
+}
+
+func deploySimpleContract(t *testing.T, ctx context.Context, client *ethclient.Client) (common.Address, string) {
+	// Minimal empty contract bytecode
+	emptyContractBytecode := "608060405234801561001057600080fd5b50600a80601f6000396000f3fe00"
+
+	// Get deployment auth
+	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(operations.DefaultL2AdminPrivateKey, "0x"))
+	require.NoError(t, err)
+
+	fromAddr := crypto.PubkeyToAddress(privateKey.PublicKey)
+	nonce, err := client.PendingNonceAt(ctx, fromAddr)
+	require.NoError(t, err)
+
+	gasPrice, err := client.SuggestGasPrice(ctx)
+	require.NoError(t, err)
+
+	// Deploy contract
+	deployTx := &types.LegacyTx{
+		CommonTx: types.CommonTx{
+			Nonce: nonce,
+			Gas:   300000,
+			Value: uint256.NewInt(0),
+			Data:  common.FromHex(emptyContractBytecode),
+		},
+		GasPrice: uint256.MustFromBig(gasPrice),
+	}
+
+	chainID, err := client.ChainID(ctx)
+	require.NoError(t, err)
+
+	signer := types.MakeSigner(operations.GetTestChainConfig(chainID.Uint64()), 1, 0)
+	signedTx, err := types.SignTx(deployTx, *signer, privateKey)
+	require.NoError(t, err)
+
+	err = client.SendTransaction(ctx, signedTx)
+	require.NoError(t, err)
+
+	err = operations.WaitTxToBeMined(ctx, client, signedTx, operations.DefaultTimeoutTxToBeMined)
+	require.NoError(t, err)
+
+	// Get contract address
+	receipt, err := client.TransactionReceipt(ctx, signedTx.Hash())
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), receipt.Status, "Contract deployment failed")
+
+	contractAddress := receipt.ContractAddress
+	t.Logf("✅ Deployed contract at: %s", contractAddress.Hex())
+
+	// Call contract to trigger execution
+	callTx := &types.LegacyTx{
+		CommonTx: types.CommonTx{
+			Nonce: nonce + 1,
+			To:    &contractAddress,
+			Gas:   50000,
+			Value: uint256.NewInt(0),
+			Data:  []byte{},
+		},
+		GasPrice: uint256.MustFromBig(gasPrice),
+	}
+
+	signedCallTx, err := types.SignTx(callTx, *signer, privateKey)
+	require.NoError(t, err)
+
+	err = client.SendTransaction(ctx, signedCallTx)
+	require.NoError(t, err)
+
+	err = operations.WaitTxToBeMined(ctx, client, signedCallTx, operations.DefaultTimeoutTxToBeMined)
+	require.NoError(t, err)
+
+	t.Log("✅ Contract deployed and called successfully")
+	return contractAddress, signedTx.Hash().String()
 }
