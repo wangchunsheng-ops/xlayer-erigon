@@ -697,7 +697,7 @@ func migrateGenesis(chaindata, input, output string) error {
 				startAcctStorage := time.Now()
 				if acctHex == scalableAddressStr {
 
-					logger.Info("scalable acct bytes", "bytes", acctBytes)
+					logger.Info("scalable acct bytes", "bytes", acctBytes, "incarnation", k[20:28])
 					scalableStorageCount, err := processScalableAddressStorageConcurrently(db, k[:28], acc)
 					acctStorageCount = scalableStorageCount
 					if err != nil {
