@@ -547,7 +547,6 @@ func processScalableAddressStorageConcurrently(db kv.RwDB, acctHex string, prefi
 				start := time.Now()
 
 				// Get cursor for this worker
-				logger.Info("range", "worker id", workerID, "start", keyRange.Start, "end", keyRange.End)
 				iter, err := workerTx.Range(kv.PlainState, keyRange.Start, keyRange.End)
 				if err != nil {
 					logger.Error("failed to create cursor", "worker", workerID, "error", err)
