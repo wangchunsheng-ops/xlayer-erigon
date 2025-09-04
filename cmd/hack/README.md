@@ -35,6 +35,9 @@ hack -action migrateGenesis -chaindata ${chaindata_dir} -input empty.json -outpu
 
 ## re-genesis state check
 ```
+export smtdata_dir=/data/rpc-bak0820/smt
+cp -r ${smtdata_dir}/mdbx.dat /mnt/ramdisk_op/smt
+
 cd test && make min-run
 # make txs fill blockchain states
 make pause
